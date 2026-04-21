@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fuse &mdash; Secure File Transfer</title>
+  <meta name="description" content="Fuse shares files with end-to-end encryption. Files self-destruct after the chosen expiry or download limit.">
+  <meta name="color-scheme" content="dark light">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a href="#main-content" class="sr-only skip-link">Skip to main content</a>
+  <header>
+    <nav aria-label="Main">
+      <a href="/" class="logo" aria-label="Fuse home">Fuse</a>
+    </nav>
+  </header>
+
+  <main id="main-content" tabindex="-1">
+    <!-- Upload View -->
+    <section id="upload-view" aria-labelledby="upload-heading">
+      <h1 id="upload-heading">Share files securely</h1>
+      <p class="tagline">End-to-end encrypted. Set a fuse. Files self-destruct.</p>
+
+      <form id="upload-form" novalidate>
+        <label class="drop-zone" id="drop-zone" for="file-input">
+          <span class="drop-zone-text">Drag and drop a file here, or click to choose one</span>
+          <span class="drop-zone-indicator" aria-hidden="true">Drop file to upload</span>
+          <input type="file" id="file-input" class="sr-only" aria-describedby="file-size-hint" required>
+          <span id="file-size-hint" class="hint">Maximum file size: <span id="max-size-display">Configured by server</span></span>
+        </label>
+
+        <div id="file-selected" class="file-selected" hidden>
+          <p><strong>Selected:</strong> <span id="selected-file-name"></span> (<span id="selected-file-size"></span>)</p>
+        </div>
+
+        <fieldset class="options">
+          <legend id="fuse-options-heading">Fuse options</legend>
+
+          <div class="field-group">
+            <label for="expire-mode">Expiry</label>
+            <select id="expire-mode">
+              <option value="none">No expiry</option>
+              <option value="days" selected>After a number of days</option>
+              <option value="date">On a specific date</option>
+            </select>
+          </div>
+
+          <div class="field-group" id="expire-days-group">
+            <label for="expire-days">Days until expiry</label>
+            <input type="number" id="expire-days" min="1" max="365" value="7">
+          </div>
+
+          <div class="field-group" id="expire-date-group" hidden>
+            <label for="expire-date">Expiry date</label>
+            <input type="date" id="expire-date">
+            <p id="expire-date-error" class="hint field-error" hidden></p>
+          </div>
+
+          <div class="field-group">
+            <label for="max-downloads">Download limit (0 = unlimited)</label>
+            <input type="number" id="max-downloads" min="0" value="0">
+          </div>
+
+          <div class="field-group">
+            <label for="password">Password (optional)</label>
+            <input type="password" id="password" autocomplete="new-password" aria-describedby="password-hint">
+            <p id="password-hint" class="hint">Leave empty for no password.</p>
+          </div>
+        </fieldset>
+
+        <button type="submit" id="upload-btn" disabled>
+          <span id="upload-btn-text">Select a file first</span>
+        </button>
+
+        <div id="form-error" role="alert"></div>
+        <span id="upload-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+
+        <div id="progress-area" class="is-idle">
+          <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Upload progress">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <p id="progress-text"></p>
+        </div>
+      </form>
+    </section>
+
+    <!-- Result View (share link) -->
+    <section id="result-view" hidden aria-labelledby="result-heading">
+      <h1 id="result-heading" tabindex="-1">Share link ready</h1>
+      <p>Your file is ready to share. Copy the link below.</p>
+
+      <div class="link-box">
+        <label for="share-link" class="sr-only">Share link</label>
+        <input type="text" id="share-link" readonly aria-describedby="link-hint">
+        <button type="button" id="copy-btn">Copy</button>
+      </div>
+      <p id="link-hint" class="hint">The encryption key is in the <code>#</code> part of the link. Your browser keeps it private &mdash; the server never sees it.</p>
+      <span id="copy-status" class="sr-only" role="status"></span>
+
+      <dl class="fuse-details" id="fuse-details"></dl>
+
+      <button type="button" id="new-upload-btn" class="secondary">Share another file</button>
+    </section>
+
+    <!-- Download View -->
+    <section id="download-view" hidden aria-labelledby="download-heading">
+      <h1 id="download-heading" tabindex="-1">Download file</h1>
+
+      <div id="download-info"></div>
+      <span id="download-status" class="sr-only" role="status"></span>
+
+      <div id="password-prompt" hidden>
+        <label for="download-password">This file is password-protected. Enter the password to continue.</label>
+        <input type="password" id="download-password" autocomplete="current-password" aria-describedby="download-error">
+        <button type="button" id="download-submit-btn">Download</button>
+      </div>
+
+      <div id="download-no-password" hidden>
+        <button type="button" id="download-direct-btn">Download</button>
+      </div>
+
+      <div id="download-progress" class="is-idle">
+        <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Download progress">
+          <div class="progress-fill" id="download-progress-fill"></div>
+        </div>
+        <p id="download-progress-text"></p>
+      </div>
+
+      <div id="download-error" role="alert"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Fuse &mdash; Files, Uploaded Securely, Encrypted</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
