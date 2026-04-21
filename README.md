@@ -29,6 +29,10 @@ You can set files to expire, limit downloads, and add an optional password.
 
 - Add an optional password per upload.
 - Password metadata is hashed on the server with Argon2id.
+- Optional first-download claim code blocks initial download unless the code is provided.
+- Claim codes are hashed with Argon2id.
+- Every upload returns a one-time owner revoke token that can instantly blow the fuse.
+- Revoke tokens are stored as HMAC-SHA-256 hashes using a server-side pepper.
 
 ### Configurable deployment
 
@@ -162,6 +166,11 @@ The following table lists each Fuse environment variable, its default value, and
 | `FUSE_SSL_KEY` | empty | Path to TLS private key file to enable HTTPS |
 | `FUSE_UPLOAD_DIR` | `./uploads` | Directory where encrypted upload blobs are stored |
 | `FUSE_CLEANUP_INTERVAL` | `10` | Minutes between cleanup checks for expired/consumed fuses |
+| `FUSE_REQUIRE_CLAIM_CODE` | `true` | Enables claim code by default for new uploads |
+| `FUSE_TOKEN_PEPPER` | `change-me-to-a-long-random-secret` | Secret key used for HMAC hashing of owner revoke tokens |
+| `FUSE_CLAIM_MAX_ATTEMPTS` | `5` | Number of bad claim code attempts allowed per IP and fuse in the time window |
+| `FUSE_CLAIM_WINDOW_MINUTES` | `15` | Sliding window for claim attempt counting |
+| `FUSE_CLAIM_BLOCK_MINUTES` | `30` | Temporary block time after too many failed claim attempts |
 
 `FUSE_BASE_URL` is normalized by the server before links are generated. This removes escaped slash or backslash formatting artifacts and trailing slashes.
 
@@ -175,15 +184,32 @@ The following table lists each Fuse environment variable, its default value, and
    - Expiry mode (none, days, or specific date)
    - Optional download limit
    - Optional password
+	- Optional first-download claim code requirement
 4. Start the upload.
-5. Copy the generated share link after upload completes.
+5. Save the owner revoke token.
+6. Share URL, decryption key, claim code, and password separately.
 
 ### Download a file
 
 1. Open the share link in a browser.
-2. If prompted, enter the password provided by the sender.
-3. Start the download.
-4. The browser downloads encrypted data, decrypts it locally using the URL fragment key, and saves the original file.
+2. If required, enter the first-download claim code.
+3. If prompted, enter the password provided by the sender.
+4. Start the download.
+5. The browser downloads encrypted data, decrypts it locally using the URL fragment key, and saves the original file.
+
+### Emergency revoke from browser
+
+If you need to immediately disable a shared fuse:
+
+1. Open the emergency revoke URL in any browser.
+2. If needed, paste the owner revoke token.
+3. Click Blow fuse now.
+
+The revoke page route is:
+
+`/revoke/:id`
+
+Fuse also provides a full emergency revoke URL in the share result screen, including the token in the URL fragment so it is not sent to the server in HTTP requests.
 
 ## Accessibility
 
@@ -221,3 +247,7 @@ The following table lists the available npm scripts for this project.
 | --- | --- |
 | `npm start` | Run the server normally (`node server.js`) |
 | `npm run dev` | Run the server in watch mode (`node --watch server.js`) |
+
+## License
+
+MIT

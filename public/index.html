@@ -48,7 +48,8 @@
 
           <div class="field-group" id="expire-days-group">
             <label for="expire-days">Days until expiry</label>
-            <input type="number" id="expire-days" min="1" max="365" value="7">
+            <input type="number" id="expire-days" min="1" max="365" value="1">
+            <p id="expire-days-error" class="hint field-error" hidden></p>
           </div>
 
           <div class="field-group" id="expire-date-group" hidden>
@@ -59,13 +60,19 @@
 
           <div class="field-group">
             <label for="max-downloads">Download limit (0 = unlimited)</label>
-            <input type="number" id="max-downloads" min="0" value="0">
+            <input type="number" id="max-downloads" min="0" value="1">
+            <p id="max-downloads-error" class="hint field-error" hidden></p>
           </div>
 
           <div class="field-group">
             <label for="password">Password (optional)</label>
             <input type="password" id="password" autocomplete="new-password" aria-describedby="password-hint">
             <p id="password-hint" class="hint">Leave empty for no password.</p>
+          </div>
+
+          <div class="field-group checkbox-row">
+            <input type="checkbox" id="claim-required" checked>
+            <label for="claim-required">Require a claim code on first download</label>
           </div>
         </fieldset>
 
@@ -88,14 +95,63 @@
     <!-- Result View (share link) -->
     <section id="result-view" hidden aria-labelledby="result-heading">
       <h1 id="result-heading" tabindex="-1">Share link ready</h1>
-      <p>Your file is ready to share. Copy the link below.</p>
+      <p>Your file is ready to share. Send each secret separately for better safety.</p>
 
-      <div class="link-box">
-        <label for="share-link" class="sr-only">Share link</label>
-        <input type="text" id="share-link" readonly aria-describedby="link-hint">
-        <button type="button" id="copy-btn">Copy</button>
+      <div class="link-box stack">
+        <label for="share-link">Share URL</label>
+        <div class="row">
+          <input type="text" id="share-link" readonly aria-describedby="link-hint">
+          <button type="button" id="copy-full-btn">Copy full link</button>
+          <button type="button" id="copy-link-btn">Copy URL</button>
+        </div>
       </div>
-      <p id="link-hint" class="hint">The encryption key is in the <code>#</code> part of the link. Your browser keeps it private &mdash; the server never sees it.</p>
+
+      <div class="link-box stack">
+        <label for="share-key">Decryption key</label>
+        <div class="row">
+          <input type="text" id="share-key" readonly>
+          <button type="button" id="copy-key-btn">Copy key</button>
+        </div>
+      </div>
+
+      <div class="link-box stack" id="claim-code-box" hidden>
+        <label for="claim-code">First-download claim code</label>
+        <div class="row">
+          <input type="text" id="claim-code" readonly>
+          <button type="button" id="copy-claim-btn">Copy code</button>
+        </div>
+      </div>
+
+      <div class="link-box stack" id="password-box" hidden>
+        <label for="share-password">Access password</label>
+        <div class="row">
+          <input type="text" id="share-password" readonly>
+          <button type="button" id="copy-password-btn">Copy password</button>
+        </div>
+      </div>
+
+      <p id="link-hint" class="hint">The decryption key and claim code are never stored in plain text on the server.</p>
+      <p class="hint warning">If you accidentally leak secrets, use the owner token to blow the fuse instantly.</p>
+
+      <div class="link-box stack">
+        <label for="owner-token">Owner revoke token (save this)</label>
+        <div class="row">
+          <input type="text" id="owner-token" readonly>
+          <button type="button" id="copy-owner-btn">Copy token</button>
+        </div>
+      </div>
+
+      <div class="link-box stack">
+        <label for="revoke-link">Emergency revoke URL</label>
+        <div class="row">
+          <input type="text" id="revoke-link" readonly>
+          <button type="button" id="copy-revoke-link-btn">Copy revoke URL</button>
+        </div>
+      </div>
+
+      <div class="actions-row">
+        <button type="button" id="blow-fuse-btn" class="danger">Blow fuse now</button>
+      </div>
       <span id="copy-status" class="sr-only" role="status"></span>
 
       <dl class="fuse-details" id="fuse-details"></dl>
@@ -113,11 +169,21 @@
       <div id="password-prompt" hidden>
         <label for="download-password">This file is password-protected. Enter the password to continue.</label>
         <input type="password" id="download-password" autocomplete="current-password" aria-describedby="download-error">
+      </div>
+
+      <div id="claim-prompt" hidden>
+        <label for="download-claim-code">Enter claim code (required on first download)</label>
+        <input type="text" id="download-claim-code" autocomplete="off" aria-describedby="download-error" spellcheck="false">
+      </div>
+
+      <div class="actions-row" id="download-action-row" hidden>
         <button type="button" id="download-submit-btn">Download</button>
       </div>
 
       <div id="download-no-password" hidden>
-        <button type="button" id="download-direct-btn">Download</button>
+        <div class="actions-row">
+          <button type="button" id="download-direct-btn">Download</button>
+        </div>
       </div>
 
       <div id="download-progress" class="is-idle">

@@ -20,10 +20,13 @@
   const expireDaysGroup = document.getElementById("expire-days-group");
   const expireDateGroup = document.getElementById("expire-date-group");
   const expireDays = document.getElementById("expire-days");
+  const expireDaysError = document.getElementById("expire-days-error");
   const expireDate = document.getElementById("expire-date");
   const expireDateError = document.getElementById("expire-date-error");
   const maxDownloads = document.getElementById("max-downloads");
+  const maxDownloadsError = document.getElementById("max-downloads-error");
   const passwordField = document.getElementById("password");
+  const claimRequiredField = document.getElementById("claim-required");
 
   const progressArea = document.getElementById("progress-area");
   const progressFill = document.getElementById("progress-fill");
@@ -32,7 +35,21 @@
   const uploadStatus = document.getElementById("upload-status");
 
   const shareLink = document.getElementById("share-link");
-  const copyBtn = document.getElementById("copy-btn");
+  const shareKey = document.getElementById("share-key");
+  const claimCodeBox = document.getElementById("claim-code-box");
+  const claimCodeField = document.getElementById("claim-code");
+  const passwordBox = document.getElementById("password-box");
+  const sharePassword = document.getElementById("share-password");
+  const ownerTokenField = document.getElementById("owner-token");
+  const revokeLinkField = document.getElementById("revoke-link");
+  const copyFullBtn = document.getElementById("copy-full-btn");
+  const copyLinkBtn = document.getElementById("copy-link-btn");
+  const copyKeyBtn = document.getElementById("copy-key-btn");
+  const copyClaimBtn = document.getElementById("copy-claim-btn");
+  const copyPasswordBtn = document.getElementById("copy-password-btn");
+  const copyOwnerBtn = document.getElementById("copy-owner-btn");
+  const copyRevokeLinkBtn = document.getElementById("copy-revoke-link-btn");
+  const blowFuseBtn = document.getElementById("blow-fuse-btn");
   const copyStatus = document.getElementById("copy-status");
   const resultHeading = document.getElementById("result-heading");
   const fuseDetails = document.getElementById("fuse-details");
@@ -43,6 +60,9 @@
   const downloadStatus = document.getElementById("download-status");
   const passwordPrompt = document.getElementById("password-prompt");
   const downloadPassword = document.getElementById("download-password");
+  const claimPrompt = document.getElementById("claim-prompt");
+  const downloadClaimCode = document.getElementById("download-claim-code");
+  const downloadActionRow = document.getElementById("download-action-row");
   const downloadSubmitBtn = document.getElementById("download-submit-btn");
   const downloadNoPassword = document.getElementById("download-no-password");
   const downloadDirectBtn = document.getElementById("download-direct-btn");
@@ -50,10 +70,19 @@
   const downloadProgressFill = document.getElementById("download-progress-fill");
   const downloadProgressText = document.getElementById("download-progress-text");
   const downloadError = document.getElementById("download-error");
+  const downloadHeading = document.getElementById("download-heading");
 
   const BASE_TITLE = "Fuse \u2014 Secure File Transfer";
 
   let selectedFile = null;
+  let currentOwnerToken = "";
+  let currentFuseId = "";
+  let currentDownloadState = {
+    fuseId: "",
+    keyString: "",
+    requiresPassword: false,
+    requiresClaim: false,
+  };
 
   // --- Crypto Helpers (Web Crypto API, AES-256-GCM) ---
 
@@ -129,6 +158,9 @@
       if (!response.ok) return;
       const config = await response.json();
       updateMaxSizeDisplay(config.maxFileSize);
+      if (typeof config.requireClaimCodeDefault === "boolean") {
+        claimRequiredField.checked = config.requireClaimCodeDefault;
+      }
     } catch (_) {
       // Keep fallback text when config is unavailable.
     }
@@ -148,20 +180,56 @@
     view.hidden = false;
   }
 
+  function getDescribedByIds(field) {
+    const value = field.getAttribute("aria-describedby") || "";
+    return value.split(/\s+/).filter(Boolean);
+  }
+
+  function addDescribedById(field, id) {
+    const ids = getDescribedByIds(field);
+    if (ids.indexOf(id) === -1) {
+      ids.push(id);
+      field.setAttribute("aria-describedby", ids.join(" "));
+    }
+  }
+
+  function removeDescribedById(field, id) {
+    const ids = getDescribedByIds(field).filter(function (currentId) {
+      return currentId !== id;
+    });
+    if (ids.length) {
+      field.setAttribute("aria-describedby", ids.join(" "));
+    } else {
+      field.removeAttribute("aria-describedby");
+    }
+  }
+
+  function setFieldError(field, errorElement, message) {
+    field.setAttribute("aria-invalid", "true");
+    if (errorElement && errorElement.id) {
+      addDescribedById(field, errorElement.id);
+      errorElement.textContent = message;
+      errorElement.hidden = false;
+    }
+  }
+
+  function clearFieldError(field, errorElement) {
+    field.removeAttribute("aria-invalid");
+    if (errorElement && errorElement.id) {
+      removeDescribedById(field, errorElement.id);
+      errorElement.textContent = "";
+      errorElement.hidden = true;
+    }
+  }
+
   // --- Expiry Mode Toggle ---
 
   function setExpireDateError(message) {
-    expireDate.setAttribute("aria-invalid", "true");
-    expireDate.setAttribute("aria-describedby", "expire-date-error");
-    expireDateError.textContent = message;
-    expireDateError.hidden = false;
+    setFieldError(expireDate, expireDateError, message);
   }
 
   function clearExpireDateError() {
-    expireDate.removeAttribute("aria-invalid");
-    expireDate.removeAttribute("aria-describedby");
-    expireDateError.textContent = "";
-    expireDateError.hidden = true;
+    clearFieldError(expireDate, expireDateError);
   }
 
   function announceUploadStatus(message) {
@@ -246,29 +314,71 @@
   uploadForm.addEventListener("submit", async function (e) {
     e.preventDefault();
     formError.textContent = "";
+    clearFieldError(expireDays, expireDaysError);
+    clearFieldError(maxDownloads, maxDownloadsError);
+    clearExpireDateError();
+
     if (!selectedFile) {
       showFormError("Please choose a file to share.");
       fileInput.focus();
       return;
     }
 
-    // Validate expiry date if that mode is selected.
     const mode = expireMode.value;
+    let firstInvalidField = null;
+    let firstErrorMessage = "";
+
+    function markInvalid(field, errorElement, message) {
+      setFieldError(field, errorElement, message);
+      if (!firstInvalidField) {
+        firstInvalidField = field;
+        firstErrorMessage = message;
+      }
+    }
+
+    let daysValue = null;
+    if (mode === "days") {
+      const rawDays = expireDays.value.trim();
+      if (!/^\d+$/.test(rawDays)) {
+        markInvalid(expireDays, expireDaysError, "Enter whole days between 1 and 365.");
+      } else {
+        const parsedDays = Number(rawDays);
+        if (parsedDays < 1 || parsedDays > 365) {
+          markInvalid(expireDays, expireDaysError, "Days until expiry must be between 1 and 365.");
+        } else {
+          daysValue = parsedDays;
+        }
+      }
+    }
+
+    const rawMaxDownloads = maxDownloads.value.trim();
+    let maxDownloadsValue = null;
+    if (!/^\d+$/.test(rawMaxDownloads)) {
+      markInvalid(maxDownloads, maxDownloadsError, "Download limit must be a whole number 0 or greater.");
+    } else {
+      const parsedMaxDownloads = Number(rawMaxDownloads);
+      if (parsedMaxDownloads < 0) {
+        markInvalid(maxDownloads, maxDownloadsError, "Download limit must be a whole number 0 or greater.");
+      } else {
+        maxDownloadsValue = parsedMaxDownloads;
+      }
+    }
+
+    // Validate expiry date if that mode is selected.
     if (mode === "date") {
       const todayStr = toLocalDateInputValue(new Date());
       if (!expireDate.value) {
-        showFormError("Please choose an expiry date.");
-        setExpireDateError("Please choose an expiry date.");
-        expireDate.focus();
-        return;
+        markInvalid(expireDate, expireDateError, "Please choose an expiry date.");
       }
-      if (expireDate.value < todayStr) {
-        showFormError("Expiry date must be today or later.");
-        setExpireDateError("Expiry date must be today or later.");
-        expireDate.focus();
-        return;
+      if (expireDate.value && expireDate.value < todayStr) {
+        markInvalid(expireDate, expireDateError, "Expiry date must be today or later.");
       }
-      clearExpireDateError();
+    }
+
+    if (firstInvalidField) {
+      showFormError(firstErrorMessage || "Please correct the highlighted fields.");
+      firstInvalidField.focus();
+      return;
     }
 
     uploadBtn.disabled = true;
@@ -295,9 +405,8 @@
       // Compute expiry
       let expiresAt = null;
       if (mode === "days") {
-        const days = parseInt(expireDays.value, 10) || 7;
         const d = new Date();
-        d.setDate(d.getDate() + days);
+        d.setDate(d.getDate() + daysValue);
         expiresAt = d.toISOString().slice(0, 19).replace("T", " ");
       } else if (mode === "date") {
         expiresAt = new Date(expireDate.value + "T23:59:59").toISOString().slice(0, 19).replace("T", " ");
@@ -307,14 +416,15 @@
         formData.append("expiresAt", expiresAt);
       }
 
-      const dl = parseInt(maxDownloads.value, 10);
-      if (dl > 0) {
-        formData.append("maxDownloads", String(dl));
+      if (maxDownloadsValue > 0) {
+        formData.append("maxDownloads", String(maxDownloadsValue));
       }
 
       if (passwordField.value) {
         formData.append("password", passwordField.value);
       }
+
+      formData.append("claimRequired", claimRequiredField.checked ? "true" : "false");
 
       // 4. Upload
       const xhr = new XMLHttpRequest();
@@ -413,8 +523,20 @@
   }
 
   function showResult(result, keyString) {
-    const fullUrl = result.url + "#" + keyString;
-    shareLink.value = fullUrl;
+    currentFuseId = result.id;
+    currentOwnerToken = result.ownerToken || "";
+
+    shareLink.value = result.url;
+    shareKey.value = keyString;
+    ownerTokenField.value = currentOwnerToken;
+    const revokeBaseUrl = result.url.replace(/\/d\/[^/]+$/, "/revoke/" + encodeURIComponent(result.id));
+    revokeLinkField.value = revokeBaseUrl + "#" + currentOwnerToken;
+
+    claimCodeBox.hidden = !result.claimRequired;
+    claimCodeField.value = result.claimCode || "";
+
+    passwordBox.hidden = !passwordField.value;
+    sharePassword.value = passwordField.value || "";
 
     fuseDetails.innerHTML = "";
     addDetail("File", selectedFile.name);
@@ -426,6 +548,7 @@
       addDetail("Download limit", maxDownloads.value);
     }
     addDetail("Password", passwordField.value ? "Yes" : "No");
+    addDetail("Claim code", result.claimRequired ? "Required on first download" : "Not required");
 
     showView(resultView);
     document.title = "Share link ready \u2014 Fuse";
@@ -448,44 +571,132 @@
   let copyResetTimeout = null;
   let copyClearTimeout = null;
 
-  copyBtn.addEventListener("click", function () {
-    function announce(msg) {
-      // Clear+reset when needed so identical messages still get announced.
-      announceStatus(copyStatus, msg);
-      if (copyClearTimeout) clearTimeout(copyClearTimeout);
-      copyClearTimeout = setTimeout(function () {
-        if (copyStatus.textContent === msg) copyStatus.textContent = "";
-      }, 5000);
-    }
-    function scheduleLabelReset() {
-      if (copyResetTimeout) clearTimeout(copyResetTimeout);
-      copyResetTimeout = setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
-    }
+  function announceCopy(msg) {
+    announceStatus(copyStatus, msg);
+    if (copyClearTimeout) clearTimeout(copyClearTimeout);
+    copyClearTimeout = setTimeout(function () {
+      if (copyStatus.textContent === msg) copyStatus.textContent = "";
+    }, 5000);
+  }
 
+  function scheduleLabelReset(button, originalLabel) {
+    if (copyResetTimeout) clearTimeout(copyResetTimeout);
+    copyResetTimeout = setTimeout(function () {
+      button.textContent = originalLabel;
+    }, 1800);
+  }
+
+  function copyValue(input, button, label, successMessage) {
+    if (!input || !button) return;
     if (!navigator.clipboard) {
-      shareLink.focus();
-      shareLink.select();
-      announce("Clipboard not available. Share link is selected \u2014 press Ctrl or Command plus C to copy.");
+      input.focus();
+      input.select();
+      announceCopy("Clipboard not available. Value selected for manual copy.");
       return;
     }
 
-    navigator.clipboard.writeText(shareLink.value).then(function () {
-      copyBtn.textContent = "Copied";
-      announce("Share link copied to clipboard.");
-      scheduleLabelReset();
+    navigator.clipboard.writeText(input.value).then(function () {
+      button.textContent = "Copied";
+      announceCopy(successMessage);
+      scheduleLabelReset(button, label);
+    }).catch(function () {
+      input.focus();
+      input.select();
+      announceCopy("Copy failed. Value selected for manual copy.");
+    });
+  }
+
+  copyLinkBtn.addEventListener("click", function () {
+    copyValue(shareLink, copyLinkBtn, "Copy URL", "Share URL copied.");
+  });
+
+  copyFullBtn.addEventListener("click", function () {
+    const fullLink = shareLink.value + "#" + shareKey.value;
+    if (!navigator.clipboard) {
+      shareLink.focus();
+      shareLink.select();
+      announceCopy("Clipboard not available. Share URL selected for manual copy.");
+      return;
+    }
+    navigator.clipboard.writeText(fullLink).then(function () {
+      copyFullBtn.textContent = "Copied";
+      announceCopy("Full link copied.");
+      scheduleLabelReset(copyFullBtn, "Copy full link");
     }).catch(function () {
       shareLink.focus();
       shareLink.select();
-      announce("Copy failed. Share link is selected \u2014 press Ctrl or Command plus C to copy.");
+      announceCopy("Copy failed. Share URL selected for manual copy.");
     });
+  });
+
+  copyKeyBtn.addEventListener("click", function () {
+    copyValue(shareKey, copyKeyBtn, "Copy key", "Decryption key copied.");
+  });
+
+  copyClaimBtn.addEventListener("click", function () {
+    copyValue(claimCodeField, copyClaimBtn, "Copy code", "Claim code copied.");
+  });
+
+  copyPasswordBtn.addEventListener("click", function () {
+    copyValue(sharePassword, copyPasswordBtn, "Copy password", "Password copied.");
+  });
+
+  copyOwnerBtn.addEventListener("click", function () {
+    copyValue(ownerTokenField, copyOwnerBtn, "Copy token", "Owner revoke token copied.");
+  });
+
+  copyRevokeLinkBtn.addEventListener("click", function () {
+    copyValue(revokeLinkField, copyRevokeLinkBtn, "Copy revoke URL", "Emergency revoke URL copied.");
+  });
+
+  blowFuseBtn.addEventListener("click", async function () {
+    if (!currentFuseId || !currentOwnerToken) {
+      announceCopy("No active fuse available to revoke.");
+      return;
+    }
+
+    const confirmed = window.confirm("Blow this fuse now? This cannot be undone.");
+    if (!confirmed) return;
+
+    blowFuseBtn.disabled = true;
+    try {
+      const response = await fetch("/api/fuse/" + encodeURIComponent(currentFuseId) + "/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownerToken: currentOwnerToken }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(function () { return {}; });
+        announceCopy(err.error || "Unable to blow fuse.");
+        blowFuseBtn.disabled = false;
+        return;
+      }
+      announceCopy("Fuse blown. Downloads are now blocked.");
+      blowFuseBtn.textContent = "Fuse blown";
+    } catch (error) {
+      announceCopy("Unable to blow fuse due to a network error.");
+      blowFuseBtn.disabled = false;
+    }
   });
 
   // --- New Upload ---
 
   newUploadBtn.addEventListener("click", function () {
     selectedFile = null;
+    currentFuseId = "";
+    currentOwnerToken = "";
     uploadForm.reset();
     fileSelected.hidden = true;
+    claimCodeBox.hidden = true;
+    passwordBox.hidden = true;
+    shareLink.value = "";
+    shareKey.value = "";
+    claimCodeField.value = "";
+    sharePassword.value = "";
+    ownerTokenField.value = "";
+    revokeLinkField.value = "";
+    blowFuseBtn.disabled = false;
+    blowFuseBtn.textContent = "Blow fuse now";
     uploadBtn.disabled = true;
     uploadBtnText.textContent = "Select a file first";
     showProgressArea(false);
@@ -499,8 +710,6 @@
 
   // --- Download Flow ---
 
-  let downloadHandlersAttached = false;
-
   async function initDownload() {
     const match = window.location.pathname.match(/^\/d\/(.+)$/);
     if (!match) return;
@@ -508,11 +717,17 @@
     const fuseId = match[1];
     const keyString = window.location.hash.slice(1);
 
+    currentDownloadState.fuseId = fuseId;
+    currentDownloadState.keyString = keyString;
+    currentDownloadState.requiresPassword = false;
+    currentDownloadState.requiresClaim = false;
+
     document.title = "Download file \u2014 Fuse";
     showView(downloadView);
+    downloadHeading.focus();
 
     if (!keyString) {
-      showDownloadError("Missing decryption key. The link may be incomplete.");
+      showDownloadError("Missing decryption key. The link may be incomplete.", true);
       return;
     }
 
@@ -521,7 +736,7 @@
       const resp = await fetch("/api/fuse/" + encodeURIComponent(fuseId));
       if (!resp.ok) {
         const err = await resp.json().catch(function () { return {}; });
-        showDownloadError(err.error || "File not found or has expired.");
+        showDownloadError(err.error || "File not found or has expired.", true);
         return;
       }
 
@@ -544,6 +759,7 @@
       addDl("Size", formatSize(info.size));
       if (info.expiresAt) addDl("Expires", new Date(info.expiresAt + "Z").toLocaleString());
       if (info.maxDownloads) addDl("Download limit", info.downloadCount + " / " + info.maxDownloads);
+      if (info.claimRequired) addDl("Claim", info.claimed ? "Already claimed" : "Claim code required for first download");
 
       downloadInfo.appendChild(dl);
       document.title = "Download " + info.originalName + " \u2014 Fuse";
@@ -551,39 +767,34 @@
       // on view switch, so announce the metadata now that it is visible.
       downloadStatus.textContent = "File ready: " + info.originalName + ", " + formatSize(info.size) + ".";
 
-      if (info.hasPassword) {
-        passwordPrompt.hidden = false;
-        downloadPassword.focus();
+      currentDownloadState.requiresPassword = !!info.hasPassword;
+      currentDownloadState.requiresClaim = !!info.claimRequired && !info.claimed;
 
-        if (!downloadHandlersAttached) {
-          downloadSubmitBtn.addEventListener("click", function () {
-            performDownload(fuseId, keyString, downloadPassword.value);
-          });
-          downloadPassword.addEventListener("keydown", function (e) {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              performDownload(fuseId, keyString, downloadPassword.value);
-            }
-          });
-          downloadHandlersAttached = true;
-        }
+      passwordPrompt.hidden = !currentDownloadState.requiresPassword;
+      claimPrompt.hidden = !currentDownloadState.requiresClaim;
+      downloadActionRow.hidden = false;
+      downloadNoPassword.hidden = true;
+
+      if (currentDownloadState.requiresClaim) {
+        downloadClaimCode.focus();
+      } else if (currentDownloadState.requiresPassword) {
+        downloadPassword.focus();
       } else {
-        downloadNoPassword.hidden = false;
-        downloadDirectBtn.focus();
-        if (!downloadHandlersAttached) {
-          downloadDirectBtn.addEventListener("click", function () {
-            performDownload(fuseId, keyString, null);
-          });
-          downloadHandlersAttached = true;
-        }
+        downloadSubmitBtn.focus();
       }
     } catch (err) {
-      showDownloadError("Could not load file information: " + err.message);
+      showDownloadError("Could not load file information: " + err.message, true);
     }
   }
 
-  async function performDownload(fuseId, keyString, password) {
+  async function performDownload() {
+    const fuseId = currentDownloadState.fuseId;
+    const keyString = currentDownloadState.keyString;
+    const password = currentDownloadState.requiresPassword ? downloadPassword.value : null;
+    const claimCode = currentDownloadState.requiresClaim ? downloadClaimCode.value : null;
+
     downloadError.textContent = "";
+    downloadClaimCode.removeAttribute("aria-invalid");
     if (downloadSubmitBtn) downloadSubmitBtn.disabled = true;
     if (downloadDirectBtn) downloadDirectBtn.disabled = true;
     showDownloadProgressArea(true);
@@ -591,17 +802,25 @@
     setProgress(downloadProgressFill, 10, "Downloading encrypted file");
 
     try {
-      const body = password ? JSON.stringify({ password }) : "{}";
+      const payload = {};
+      if (password) payload.password = password;
+      if (claimCode) payload.claimCode = String(claimCode).trim().toUpperCase();
+
       const resp = await fetch("/api/fuse/" + encodeURIComponent(fuseId) + "/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body,
+        body: JSON.stringify(payload),
       });
 
       if (!resp.ok) {
         const err = await resp.json().catch(function () { return {}; });
-        const isAuthFailure = err.needsPassword || resp.status === 401 || resp.status === 403;
-        if (err.needsPassword) {
+        const isAuthFailure = err.needsPassword || resp.status === 401;
+        if (err.needsClaimCode) {
+          showDownloadError(err.error || "Claim code required.");
+          announceStatus(downloadStatus, "Download failed: claim code required.");
+          downloadClaimCode.setAttribute("aria-invalid", "true");
+          downloadClaimCode.focus();
+        } else if (err.needsPassword) {
           showDownloadError("Password required. Please enter the password and try again.");
           announceStatus(downloadStatus, "Download failed: password required.");
         } else {
@@ -634,7 +853,11 @@
       let filename = "download";
       const filenameMatch = disposition.match(/filename="?([^";\n]+)"?/);
       if (filenameMatch) {
-        filename = decodeURIComponent(filenameMatch[1]);
+        try {
+          filename = decodeURIComponent(filenameMatch[1]);
+        } catch (_) {
+          filename = filenameMatch[1];
+        }
       }
 
       // Trigger download
@@ -659,9 +882,36 @@
     }
   }
 
-  function showDownloadError(msg) {
-    // role="alert" announces the message automatically; no need to steal focus.
+  downloadSubmitBtn.addEventListener("click", function () {
+    performDownload();
+  });
+
+  downloadDirectBtn.addEventListener("click", function () {
+    performDownload();
+  });
+
+  downloadPassword.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      performDownload();
+    }
+  });
+
+  downloadClaimCode.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      performDownload();
+    }
+  });
+
+  function showDownloadError(msg, shouldFocusAlert) {
     downloadError.textContent = msg;
+    if (shouldFocusAlert) {
+      if (!downloadError.hasAttribute("tabindex")) {
+        downloadError.setAttribute("tabindex", "-1");
+      }
+      downloadError.focus();
+    }
   }
 
   // --- Init ---

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fuse - Emergency Revoke</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a href="#main-content" class="sr-only skip-link">Skip to main content</a>
+  <header>
+    <nav aria-label="Main">
+      <a href="/" class="logo" aria-label="Fuse home">Fuse</a>
+    </nav>
+  </header>
+
+  <main id="main-content" tabindex="-1">
+    <section aria-labelledby="revoke-heading">
+      <h1 id="revoke-heading" tabindex="-1">Emergency revoke</h1>
+      <p class="tagline">Blow a fuse immediately if a link was shared by mistake.</p>
+
+      <form id="revoke-form" novalidate>
+        <div class="field-group">
+          <label for="fuse-id">Fuse ID</label>
+          <input type="text" id="fuse-id" readonly>
+        </div>
+
+        <div class="field-group">
+          <label for="owner-token">Owner revoke token</label>
+          <input type="password" id="owner-token" autocomplete="off" required>
+          <p class="hint">Paste the token you saved when creating the share.</p>
+        </div>
+
+        <button type="submit" id="revoke-btn">Blow fuse now</button>
+
+        <div id="revoke-error" role="alert"></div>
+        <div id="revoke-success" role="status" aria-live="polite"></div>
+      </form>
+    </section>
+  </main>
+
+  <footer>
+    <p>Fuse - Files, Uploaded Securely, Encrypted</p>
+  </footer>
+
+  <script src="/revoke.js"></script>
+</body>
+</html>
