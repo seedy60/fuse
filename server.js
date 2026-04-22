@@ -332,11 +332,12 @@ app.post("/api/fuse/:id/download", express.json(), async (req, res) => {
   db.incrementDownloads.run(fuse.id);
 
   const updatedFuse = db.getById.get(fuse.id);
-  if (updatedFuse.max_downloads && updatedFuse.download_count >= updatedFuse.max_downloads) {
-    cleanupFuse(updatedFuse);
-  }
+  const shouldBlowAfterSend = !!(updatedFuse.max_downloads && updatedFuse.download_count >= updatedFuse.max_downloads);
 
   if (!fs.existsSync(fuse.file_path)) {
+    if (shouldBlowAfterSend) {
+      cleanupFuse(updatedFuse);
+    }
     return res.status(410).json({ error: "The file is no longer available." });
   }
 
@@ -345,6 +346,24 @@ app.post("/api/fuse/:id/download", express.json(), async (req, res) => {
   res.setHeader("Content-Length", fuse.size);
 
   const stream = fs.createReadStream(fuse.file_path);
+
+  stream.on("error", (error) => {
+    console.error("Download stream error:", error);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: "Download failed." });
+    }
+    res.destroy(error);
+  });
+
+  if (shouldBlowAfterSend) {
+    res.on("finish", () => {
+      const latest = db.getById.get(fuse.id);
+      if (latest && !latest.blown && latest.max_downloads && latest.download_count >= latest.max_downloads) {
+        cleanupFuse(latest);
+      }
+    });
+  }
+
   stream.pipe(res);
 });
 
