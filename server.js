@@ -25,6 +25,9 @@ const CLAIM_WINDOW_MS = (parseInt(process.env.FUSE_CLAIM_WINDOW_MINUTES, 10) || 
 const CLAIM_BLOCK_MS = (parseInt(process.env.FUSE_CLAIM_BLOCK_MINUTES, 10) || 30) * 60 * 1000;
 const SSL_CERT = process.env.FUSE_SSL_CERT;
 const SSL_KEY = process.env.FUSE_SSL_KEY;
+const ENCRYPTED_FILE_OVERHEAD_BYTES = 28; // 12-byte IV + 16-byte AES-GCM auth tag.
+const UPLOAD_TIMEOUT_MINUTES = parseNonNegativeInteger(process.env.FUSE_UPLOAD_TIMEOUT_MINUTES, 60);
+const UPLOAD_TIMEOUT_MS = UPLOAD_TIMEOUT_MINUTES === 0 ? 0 : UPLOAD_TIMEOUT_MINUTES * 60 * 1000;
 
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -36,7 +39,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const upload = multer({
   dest: UPLOAD_DIR,
-  limits: { fileSize: MAX_FILE_SIZE },
+  limits: { fileSize: MAX_FILE_SIZE + ENCRYPTED_FILE_OVERHEAD_BYTES },
 });
 
 const claimAttemptState = new Map();
@@ -50,6 +53,20 @@ const argon2ClaimOptions = {
 
 if (!TOKEN_PEPPER) {
   console.warn("FUSE_TOKEN_PEPPER is not set. Set it in .env for stronger token hashing.");
+}
+
+function parseNonNegativeInteger(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+  return `${(bytes / 1073741824).toFixed(2)} GB`;
 }
 
 function hashSecret(secret) {
@@ -141,6 +158,69 @@ function parseBoolean(value, defaultValue) {
   return defaultValue;
 }
 
+function removeFileAtPath(filePath) {
+  if (filePath && fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+}
+
+function removeUploadedFile(file) {
+  removeFileAtPath(file && file.path);
+}
+
+function cleanupReceivedFiles(req) {
+  removeUploadedFile(req.file);
+  if (!req.files) return;
+
+  if (Array.isArray(req.files)) {
+    for (const file of req.files) {
+      removeUploadedFile(file);
+    }
+    return;
+  }
+
+  for (const files of Object.values(req.files)) {
+    for (const file of files) {
+      removeUploadedFile(file);
+    }
+  }
+}
+
+function logUploadStart(req, res, next) {
+  const contentLength = Number(req.headers["content-length"]);
+  const sizeLabel = Number.isFinite(contentLength) ? formatBytes(contentLength) : "unknown size";
+
+  console.log(`Upload request started: ${sizeLabel}`);
+  req.once("aborted", () => {
+    console.warn(`Upload request aborted before completion: ${sizeLabel}`);
+  });
+
+  next();
+}
+
+function receiveUpload(req, res, next) {
+  upload.single("file")(req, res, function (err) {
+    if (!err) return next();
+
+    cleanupReceivedFiles(req);
+
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      console.warn(`Upload rejected: file is larger than ${formatBytes(MAX_FILE_SIZE)}.`);
+      return res.status(413).json({
+        error: `File is larger than the ${formatBytes(MAX_FILE_SIZE)} limit.`,
+      });
+    }
+
+    if (err instanceof multer.MulterError) {
+      console.warn("Upload rejected by multipart parser:", err.message);
+      return res.status(400).json({ error: "Upload could not be parsed." });
+    }
+
+    console.error("Upload receive error:", err);
+    return res.status(500).json({ error: "Upload failed while receiving the file." });
+  });
+}
+
 function isFuseUnavailable(fuse) {
   if (!fuse) {
     return { unavailable: true, status: 404, error: "Share link not found." };
@@ -168,7 +248,9 @@ app.get("/api/config", (req, res) => {
   });
 });
 
-app.post("/api/upload", upload.single("file"), async (req, res) => {
+app.post("/api/upload", logUploadStart, receiveUpload, async (req, res) => {
+  let finalPath = null;
+
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file provided." });
@@ -176,8 +258,9 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
 
     const id = nanoid(16);
     const { originalname, path: tmpPath, size } = req.file;
+    console.log(`Upload received: ${originalname} (${formatBytes(size)})`);
 
-    const finalPath = path.join(UPLOAD_DIR, id);
+    finalPath = path.join(UPLOAD_DIR, id);
     fs.renameSync(tmpPath, finalPath);
 
     let passwordHash = null;
@@ -230,11 +313,11 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
       claimCode,
       claimRequired,
     });
+    console.log(`Upload stored: ${id} (${formatBytes(size)})`);
   } catch (err) {
     console.error("Upload error:", err);
-    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
+    cleanupReceivedFiles(req);
+    removeFileAtPath(finalPath);
     res.status(500).json({ error: "Upload failed." });
   }
 });
@@ -407,9 +490,12 @@ if (SSL_CERT && SSL_KEY) {
   server = http.createServer(app);
 }
 
+server.requestTimeout = UPLOAD_TIMEOUT_MS;
+
 server.listen(PORT, () => {
   const protocol = SSL_CERT && SSL_KEY ? "https" : "http";
   console.log(`Fuse is running at ${protocol}://localhost:${PORT}`);
   console.log(`Max file size: ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)} MB`);
+  console.log(`Upload request timeout: ${UPLOAD_TIMEOUT_MINUTES === 0 ? "disabled" : `${UPLOAD_TIMEOUT_MINUTES} minutes`}`);
   runCleanup();
 });

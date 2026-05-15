@@ -75,6 +75,7 @@
   const BASE_TITLE = "Fuse \u2014 Secure File Transfer";
 
   let selectedFile = null;
+  let configuredMaxFileSize = null;
   let currentOwnerToken = "";
   let currentFuseId = "";
   let currentDownloadState = {
@@ -157,7 +158,10 @@
       const response = await fetch("/api/config", { method: "GET" });
       if (!response.ok) return;
       const config = await response.json();
-      updateMaxSizeDisplay(config.maxFileSize);
+      if (Number.isFinite(config.maxFileSize) && config.maxFileSize > 0) {
+        configuredMaxFileSize = config.maxFileSize;
+        updateMaxSizeDisplay(configuredMaxFileSize);
+      }
       if (typeof config.requireClaimCodeDefault === "boolean") {
         claimRequiredField.checked = config.requireClaimCodeDefault;
       }
@@ -301,12 +305,31 @@
   });
 
   function selectFile(file) {
+    formError.textContent = "";
+
+    if (configuredMaxFileSize && file.size > configuredMaxFileSize) {
+      clearSelectedFile();
+      fileInput.value = "";
+      showFormError("File is too large. Maximum file size is " + formatSize(configuredMaxFileSize) + ".");
+      fileInput.focus();
+      return;
+    }
+
     selectedFile = file;
     selectedFileName.textContent = file.name;
     selectedFileSize.textContent = formatSize(file.size);
     fileSelected.hidden = false;
     uploadBtn.disabled = false;
     uploadBtnText.textContent = "Encrypt & Upload";
+  }
+
+  function clearSelectedFile() {
+    selectedFile = null;
+    selectedFileName.textContent = "";
+    selectedFileSize.textContent = "";
+    fileSelected.hidden = true;
+    uploadBtn.disabled = true;
+    uploadBtnText.textContent = "Select a file first";
   }
 
   // --- Upload ---
@@ -459,8 +482,26 @@
       });
 
       xhr.addEventListener("error", function () {
-        showFormError("Upload failed: network error. Please check your connection and try again.");
+        showFormError("Upload failed: the connection closed before the server finished receiving the file.");
         announceUploadStatus("Upload failed due to a network error.");
+        setProgress(progressFill, 0, "");
+        showProgressArea(false);
+        uploadBtn.disabled = false;
+        uploadBtn.focus();
+      });
+
+      xhr.addEventListener("abort", function () {
+        showFormError("Upload cancelled before it finished.");
+        announceUploadStatus("Upload cancelled.");
+        setProgress(progressFill, 0, "");
+        showProgressArea(false);
+        uploadBtn.disabled = false;
+        uploadBtn.focus();
+      });
+
+      xhr.addEventListener("timeout", function () {
+        showFormError("Upload failed: the server took too long to receive the file.");
+        announceUploadStatus("Upload timed out.");
         setProgress(progressFill, 0, "");
         showProgressArea(false);
         uploadBtn.disabled = false;
@@ -469,8 +510,11 @@
 
       xhr.send(formData);
     } catch (err) {
-      showFormError("Error: " + err.message);
-      announceUploadStatus("Upload failed: " + err.message);
+      const message = err && err.message
+        ? err.message
+        : "The browser could not read or encrypt this file.";
+      showFormError("Upload failed: " + message);
+      announceUploadStatus("Upload failed: " + message);
       setProgress(progressFill, 0, "");
       showProgressArea(false);
       uploadBtn.disabled = false;
@@ -682,11 +726,10 @@
   // --- New Upload ---
 
   newUploadBtn.addEventListener("click", function () {
-    selectedFile = null;
+    clearSelectedFile();
     currentFuseId = "";
     currentOwnerToken = "";
     uploadForm.reset();
-    fileSelected.hidden = true;
     claimCodeBox.hidden = true;
     passwordBox.hidden = true;
     shareLink.value = "";
@@ -697,8 +740,6 @@
     revokeLinkField.value = "";
     blowFuseBtn.disabled = false;
     blowFuseBtn.textContent = "Blow fuse now";
-    uploadBtn.disabled = true;
-    uploadBtnText.textContent = "Select a file first";
     showProgressArea(false);
     setProgress(progressFill, 0, "");
     formError.textContent = "";
