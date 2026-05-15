@@ -166,6 +166,8 @@ The following table lists each Fuse environment variable, its default value, and
 | `FUSE_SSL_KEY` | empty | Path to TLS private key file to enable HTTPS |
 | `FUSE_UPLOAD_DIR` | `./uploads` | Directory where encrypted upload blobs are stored |
 | `FUSE_UPLOAD_TIMEOUT_MINUTES` | `60` | Minutes allowed for a request body to finish uploading; set to `0` to disable this timeout |
+| `FUSE_UPLOAD_CHUNK_SIZE_BYTES` | `33554432` | Maximum encrypted bytes sent per chunked upload request |
+| `FUSE_CHUNK_UPLOAD_TTL_HOURS` | `24` | Hours before incomplete chunked uploads are cleaned up |
 | `FUSE_CLEANUP_INTERVAL` | `10` | Minutes between cleanup checks for expired/consumed fuses |
 | `FUSE_REQUIRE_CLAIM_CODE` | `true` | Enables claim code by default for new uploads |
 | `FUSE_TOKEN_PEPPER` | `change-me-to-a-long-random-secret` | Secret key used for HMAC hashing of owner revoke tokens |

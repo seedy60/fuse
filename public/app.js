@@ -73,9 +73,11 @@
   const downloadHeading = document.getElementById("download-heading");
 
   const BASE_TITLE = "Fuse \u2014 Secure File Transfer";
+  const DEFAULT_UPLOAD_CHUNK_SIZE = 33554432;
 
   let selectedFile = null;
   let configuredMaxFileSize = null;
+  let configuredUploadChunkSize = DEFAULT_UPLOAD_CHUNK_SIZE;
   let currentOwnerToken = "";
   let currentFuseId = "";
   let currentDownloadState = {
@@ -161,6 +163,9 @@
       if (Number.isFinite(config.maxFileSize) && config.maxFileSize > 0) {
         configuredMaxFileSize = config.maxFileSize;
         updateMaxSizeDisplay(configuredMaxFileSize);
+      }
+      if (Number.isFinite(config.uploadChunkSize) && config.uploadChunkSize > 0) {
+        configuredUploadChunkSize = Math.floor(config.uploadChunkSize);
       }
       if (typeof config.requireClaimCodeDefault === "boolean") {
         claimRequiredField.checked = config.requireClaimCodeDefault;
@@ -420,10 +425,8 @@
       announceUploadStatus("Uploading encrypted file.");
       setProgress(progressFill, 50, "Uploading encrypted file");
 
-      // 3. Build form data
+      // 3. Build upload metadata
       const blob = new Blob([encryptedData], { type: "application/octet-stream" });
-      const formData = new FormData();
-      formData.append("file", blob, selectedFile.name);
 
       // Compute expiry
       let expiresAt = null;
@@ -435,80 +438,18 @@
         expiresAt = new Date(expireDate.value + "T23:59:59").toISOString().slice(0, 19).replace("T", " ");
       }
 
-      if (expiresAt) {
-        formData.append("expiresAt", expiresAt);
-      }
-
-      if (maxDownloadsValue > 0) {
-        formData.append("maxDownloads", String(maxDownloadsValue));
-      }
-
-      if (passwordField.value) {
-        formData.append("password", passwordField.value);
-      }
-
-      formData.append("claimRequired", claimRequiredField.checked ? "true" : "false");
+      const uploadOptions = {
+        expiresAt,
+        maxDownloads: maxDownloadsValue > 0 ? String(maxDownloadsValue) : "",
+        password: passwordField.value || "",
+        claimRequired: claimRequiredField.checked ? "true" : "false",
+      };
 
       // 4. Upload
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/upload");
-
-      xhr.upload.addEventListener("progress", function (evt) {
-        if (evt.lengthComputable) {
-          const pct = 50 + (evt.loaded / evt.total) * 45;
-          setProgress(progressFill, pct, "Uploading encrypted file");
-        }
-      });
-
-      xhr.addEventListener("load", function () {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          announceUploadStatus("Upload complete. Generating your share link.");
-          setProgress(progressFill, 100, "Upload complete");
-          const result = JSON.parse(xhr.responseText);
-          showResult(result, keyString);
-        } else {
-          let message = "Upload failed.";
-          try {
-            const err = JSON.parse(xhr.responseText);
-            if (err && err.error) message = "Upload failed: " + err.error;
-          } catch (_) { /* ignore */ }
-          showFormError(message);
-          announceUploadStatus(message);
-          setProgress(progressFill, 0, "");
-          showProgressArea(false);
-          uploadBtn.disabled = false;
-          uploadBtn.focus();
-        }
-      });
-
-      xhr.addEventListener("error", function () {
-        showFormError("Upload failed: the connection closed before the server finished receiving the file.");
-        announceUploadStatus("Upload failed due to a network error.");
-        setProgress(progressFill, 0, "");
-        showProgressArea(false);
-        uploadBtn.disabled = false;
-        uploadBtn.focus();
-      });
-
-      xhr.addEventListener("abort", function () {
-        showFormError("Upload cancelled before it finished.");
-        announceUploadStatus("Upload cancelled.");
-        setProgress(progressFill, 0, "");
-        showProgressArea(false);
-        uploadBtn.disabled = false;
-        uploadBtn.focus();
-      });
-
-      xhr.addEventListener("timeout", function () {
-        showFormError("Upload failed: the server took too long to receive the file.");
-        announceUploadStatus("Upload timed out.");
-        setProgress(progressFill, 0, "");
-        showProgressArea(false);
-        uploadBtn.disabled = false;
-        uploadBtn.focus();
-      });
-
-      xhr.send(formData);
+      const result = await uploadEncryptedBlob(blob, selectedFile.name, uploadOptions);
+      announceUploadStatus("Upload complete. Generating your share link.");
+      setProgress(progressFill, 100, "Upload complete");
+      showResult(result, keyString);
     } catch (err) {
       const message = err && err.message
         ? err.message
@@ -521,6 +462,150 @@
       uploadBtn.focus();
     }
   });
+
+  function appendUploadOptions(formData, uploadOptions) {
+    if (uploadOptions.expiresAt) {
+      formData.append("expiresAt", uploadOptions.expiresAt);
+    }
+    if (uploadOptions.maxDownloads) {
+      formData.append("maxDownloads", uploadOptions.maxDownloads);
+    }
+    if (uploadOptions.password) {
+      formData.append("password", uploadOptions.password);
+    }
+    formData.append("claimRequired", uploadOptions.claimRequired);
+  }
+
+  function sendUploadRequest(method, url, body, options) {
+    const requestOptions = options || {};
+
+    return new Promise(function (resolve, reject) {
+      const xhr = new XMLHttpRequest();
+      xhr.open(method, url);
+
+      if (requestOptions.headers) {
+        Object.keys(requestOptions.headers).forEach(function (header) {
+          xhr.setRequestHeader(header, requestOptions.headers[header]);
+        });
+      }
+
+      if (requestOptions.onUploadProgress) {
+        xhr.upload.addEventListener("progress", function (evt) {
+          if (evt.lengthComputable) {
+            requestOptions.onUploadProgress(evt.loaded, evt.total);
+          }
+        });
+      }
+
+      xhr.addEventListener("load", function () {
+        let result = null;
+        try {
+          result = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch (_) {
+          result = null;
+        }
+
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(result);
+          return;
+        }
+
+        reject(new Error((result && result.error) || "Upload failed."));
+      });
+
+      xhr.addEventListener("error", function () {
+        reject(new Error("the connection closed before the server finished receiving the file."));
+      });
+
+      xhr.addEventListener("abort", function () {
+        reject(new Error("upload cancelled before it finished."));
+      });
+
+      xhr.addEventListener("timeout", function () {
+        reject(new Error("the server took too long to receive the file."));
+      });
+
+      xhr.send(body);
+    });
+  }
+
+  async function uploadEncryptedBlob(blob, originalName, uploadOptions) {
+    if (blob.size <= configuredUploadChunkSize) {
+      return uploadEncryptedBlobSingle(blob, originalName, uploadOptions);
+    }
+
+    return uploadEncryptedBlobInChunks(blob, originalName, uploadOptions);
+  }
+
+  async function uploadEncryptedBlobSingle(blob, originalName, uploadOptions) {
+    const formData = new FormData();
+    formData.append("file", blob, originalName);
+    appendUploadOptions(formData, uploadOptions);
+
+    return sendUploadRequest("POST", "/api/upload", formData, {
+      onUploadProgress: function (loaded, total) {
+        const pct = 50 + (loaded / total) * 45;
+        setProgress(progressFill, pct, "Uploading encrypted file");
+      },
+    });
+  }
+
+  async function uploadEncryptedBlobInChunks(blob, originalName, uploadOptions) {
+    setProgress(progressFill, 50, "Starting encrypted upload");
+
+    const started = await sendUploadRequest(
+      "POST",
+      "/api/upload/start",
+      JSON.stringify({ totalSize: blob.size }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+
+    const uploadId = started && started.uploadId;
+    const chunkSize = started && Number.isFinite(started.chunkSize)
+      ? started.chunkSize
+      : configuredUploadChunkSize;
+    if (!uploadId || !Number.isFinite(chunkSize) || chunkSize <= 0) {
+      throw new Error("the server could not start a chunked upload.");
+    }
+
+    const totalChunks = Math.ceil(blob.size / chunkSize);
+    for (let index = 0; index < totalChunks; index += 1) {
+      const start = index * chunkSize;
+      const end = Math.min(blob.size, start + chunkSize);
+      const chunk = blob.slice(start, end);
+      const formData = new FormData();
+      formData.append("uploadId", uploadId);
+      formData.append("chunkIndex", String(index));
+      formData.append("totalChunks", String(totalChunks));
+      formData.append("totalSize", String(blob.size));
+      formData.append("file", chunk, originalName + ".part");
+
+      await sendUploadRequest("POST", "/api/upload/chunk", formData, {
+        onUploadProgress: function (loaded, total) {
+          const chunkLoaded = Math.min(loaded, total);
+          const uploaded = start + chunkLoaded;
+          const pct = 50 + (uploaded / blob.size) * 45;
+          setProgress(progressFill, pct, "Uploading encrypted file (" + (index + 1) + " of " + totalChunks + ")");
+        },
+      });
+    }
+
+    setProgress(progressFill, 96, "Finalizing encrypted file");
+
+    const completePayload = Object.assign({}, uploadOptions, {
+      uploadId,
+      originalName,
+      totalSize: blob.size,
+      totalChunks,
+    });
+
+    return sendUploadRequest(
+      "POST",
+      "/api/upload/complete",
+      JSON.stringify(completePayload),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  }
 
   function showFormError(msg) {
     formError.textContent = msg;

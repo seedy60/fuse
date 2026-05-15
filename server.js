@@ -17,6 +17,7 @@ const BASE_URL = (process.env.FUSE_BASE_URL || `http://localhost:${PORT}`)
   .replace(/\\(?=\/)/g, "")
   .replace(/\/+$/, "");
 const UPLOAD_DIR = process.env.FUSE_UPLOAD_DIR || path.join(__dirname, "uploads");
+const CHUNK_UPLOAD_DIR = path.join(UPLOAD_DIR, ".chunks");
 const CLEANUP_INTERVAL = (parseInt(process.env.FUSE_CLEANUP_INTERVAL, 10) || 10) * 60 * 1000;
 const REQUIRE_CLAIM_CODE_DEFAULT = String(process.env.FUSE_REQUIRE_CLAIM_CODE || "true").toLowerCase() !== "false";
 const TOKEN_PEPPER = process.env.FUSE_TOKEN_PEPPER || "";
@@ -28,9 +29,15 @@ const SSL_KEY = process.env.FUSE_SSL_KEY;
 const ENCRYPTED_FILE_OVERHEAD_BYTES = 28; // 12-byte IV + 16-byte AES-GCM auth tag.
 const UPLOAD_TIMEOUT_MINUTES = parseNonNegativeInteger(process.env.FUSE_UPLOAD_TIMEOUT_MINUTES, 60);
 const UPLOAD_TIMEOUT_MS = UPLOAD_TIMEOUT_MINUTES === 0 ? 0 : UPLOAD_TIMEOUT_MINUTES * 60 * 1000;
+const UPLOAD_CHUNK_SIZE_BYTES = parseNonNegativeInteger(process.env.FUSE_UPLOAD_CHUNK_SIZE_BYTES, 33554432) || 33554432;
+const UPLOAD_CHUNK_PARSER_LIMIT_BYTES = UPLOAD_CHUNK_SIZE_BYTES + 1048576;
+const CHUNK_UPLOAD_TTL_HOURS = parseNonNegativeInteger(process.env.FUSE_CHUNK_UPLOAD_TTL_HOURS, 24) || 24;
+const CHUNK_UPLOAD_TTL_MS = CHUNK_UPLOAD_TTL_HOURS * 60 * 60 * 1000;
 
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+for (const dir of [UPLOAD_DIR, CHUNK_UPLOAD_DIR]) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
 }
 
 const app = express();
@@ -40,6 +47,11 @@ app.use(express.static(path.join(__dirname, "public")));
 const upload = multer({
   dest: UPLOAD_DIR,
   limits: { fileSize: MAX_FILE_SIZE + ENCRYPTED_FILE_OVERHEAD_BYTES },
+});
+
+const chunkUpload = multer({
+  dest: UPLOAD_DIR,
+  limits: { fileSize: UPLOAD_CHUNK_PARSER_LIMIT_BYTES },
 });
 
 const claimAttemptState = new Map();
@@ -67,6 +79,13 @@ function formatBytes(bytes) {
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
   return `${(bytes / 1073741824).toFixed(2)} GB`;
+}
+
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  err.publicMessage = message;
+  return err;
 }
 
 function hashSecret(secret) {
@@ -158,6 +177,19 @@ function parseBoolean(value, defaultValue) {
   return defaultValue;
 }
 
+function parseUploadInteger(value) {
+  const stringValue = String(value ?? "").trim();
+  if (!/^\d+$/.test(stringValue)) return null;
+  const parsed = Number(stringValue);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function normalizeOriginalName(value) {
+  const parts = String(value || "file").split(/[\\/]/);
+  const name = parts[parts.length - 1].trim();
+  return (name || "file").slice(0, 255);
+}
+
 function removeFileAtPath(filePath) {
   if (filePath && fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
@@ -183,6 +215,36 @@ function cleanupReceivedFiles(req) {
     for (const file of files) {
       removeUploadedFile(file);
     }
+  }
+}
+
+function getChunkUploadDir(uploadId) {
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(uploadId || "")) return null;
+  return path.join(CHUNK_UPLOAD_DIR, uploadId);
+}
+
+function getChunkFilePath(uploadDir, chunkIndex) {
+  return path.join(uploadDir, `${chunkIndex}.part`);
+}
+
+function removeChunkUploadDir(uploadDir) {
+  if (!uploadDir) return;
+
+  const basePath = path.resolve(CHUNK_UPLOAD_DIR);
+  const resolvedPath = path.resolve(uploadDir);
+  if (resolvedPath === basePath || !resolvedPath.startsWith(basePath + path.sep)) {
+    return;
+  }
+
+  fs.rmSync(resolvedPath, { recursive: true, force: true });
+}
+
+function validateEncryptedUploadSize(size) {
+  if (!Number.isSafeInteger(size) || size <= 0) {
+    throw httpError(400, "Upload size is invalid.");
+  }
+  if (size > MAX_FILE_SIZE + ENCRYPTED_FILE_OVERHEAD_BYTES) {
+    throw httpError(413, `File is larger than the ${formatBytes(MAX_FILE_SIZE)} limit.`);
   }
 }
 
@@ -221,6 +283,113 @@ function receiveUpload(req, res, next) {
   });
 }
 
+function receiveUploadChunk(req, res, next) {
+  chunkUpload.single("file")(req, res, function (err) {
+    if (!err) return next();
+
+    cleanupReceivedFiles(req);
+
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      console.warn(`Upload chunk rejected: chunk is larger than ${formatBytes(UPLOAD_CHUNK_SIZE_BYTES)}.`);
+      return res.status(413).json({
+        error: `Upload chunk is larger than the ${formatBytes(UPLOAD_CHUNK_SIZE_BYTES)} chunk limit.`,
+      });
+    }
+
+    if (err instanceof multer.MulterError) {
+      console.warn("Upload chunk rejected by multipart parser:", err.message);
+      return res.status(400).json({ error: "Upload chunk could not be parsed." });
+    }
+
+    console.error("Upload chunk receive error:", err);
+    return res.status(500).json({ error: "Upload failed while receiving a chunk." });
+  });
+}
+
+async function appendChunkToStream(sourcePath, writeStream) {
+  await new Promise((resolve, reject) => {
+    const readStream = fs.createReadStream(sourcePath);
+    const handleWriteError = (err) => {
+      readStream.destroy();
+      reject(err);
+    };
+    readStream.on("error", reject);
+    writeStream.once("error", handleWriteError);
+    readStream.on("end", () => {
+      writeStream.off("error", handleWriteError);
+      resolve();
+    });
+    readStream.pipe(writeStream, { end: false });
+  });
+}
+
+async function assembleChunks(uploadDir, totalChunks, finalPath) {
+  const writeStream = fs.createWriteStream(finalPath, { flags: "wx" });
+  try {
+    for (let index = 0; index < totalChunks; index += 1) {
+      await appendChunkToStream(getChunkFilePath(uploadDir, index), writeStream);
+    }
+  } finally {
+    await new Promise((resolve) => writeStream.end(resolve));
+  }
+}
+
+async function createFuseRecord(options) {
+  const { id = nanoid(16), originalName, finalPath, size, body } = options;
+  validateEncryptedUploadSize(size);
+
+  let passwordHash = null;
+  if (body.password && body.password.length > 0) {
+    passwordHash = await argon2.hash(body.password, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 1,
+    });
+  }
+
+  let expiresAt = null;
+  if (body.expiresAt) {
+    expiresAt = body.expiresAt;
+  }
+
+  let maxDownloads = null;
+  if (body.maxDownloads && parseInt(body.maxDownloads, 10) > 0) {
+    maxDownloads = parseInt(body.maxDownloads, 10);
+  }
+
+  const ownerToken = generateOwnerToken();
+  const ownerTokenHash = hashOwnerToken(ownerToken);
+
+  const claimRequired = parseBoolean(body.claimRequired, REQUIRE_CLAIM_CODE_DEFAULT);
+  const claimCode = claimRequired ? generateClaimCode() : null;
+  const claimCodeHash = claimCode
+    ? await argon2.hash(claimCode, argon2ClaimOptions)
+    : null;
+
+  db.insert.run({
+    id,
+    originalName,
+    filePath: finalPath,
+    size,
+    passwordHash,
+    maxDownloads,
+    expiresAt,
+    ownerTokenHash,
+    claimCodeHash,
+    claimRequired: claimRequired ? 1 : 0,
+    claimed: claimRequired ? 0 : 1,
+  });
+
+  return {
+    id,
+    url: `${BASE_URL}/d/${id}`,
+    ownerToken,
+    claimCode,
+    claimRequired,
+  };
+}
+
 function isFuseUnavailable(fuse) {
   if (!fuse) {
     return { unavailable: true, status: 404, error: "Share link not found." };
@@ -244,8 +413,134 @@ function isFuseUnavailable(fuse) {
 app.get("/api/config", (req, res) => {
   res.json({
     maxFileSize: MAX_FILE_SIZE,
+    uploadChunkSize: UPLOAD_CHUNK_SIZE_BYTES,
     requireClaimCodeDefault: REQUIRE_CLAIM_CODE_DEFAULT,
   });
+});
+
+app.post("/api/upload/start", (req, res) => {
+  try {
+    const totalSize = parseUploadInteger(req.body.totalSize);
+    validateEncryptedUploadSize(totalSize);
+
+    const uploadId = nanoid(24);
+    const uploadDir = getChunkUploadDir(uploadId);
+    fs.mkdirSync(uploadDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(uploadDir, "state.json"),
+      JSON.stringify({
+        createdAt: new Date().toISOString(),
+        totalSize,
+      }),
+    );
+
+    console.log(`Chunked upload started: ${uploadId} (${formatBytes(totalSize)})`);
+    res.json({
+      uploadId,
+      chunkSize: UPLOAD_CHUNK_SIZE_BYTES,
+    });
+  } catch (err) {
+    const status = err.status || 500;
+    console.error("Chunked upload start error:", err);
+    res.status(status).json({ error: err.publicMessage || "Upload could not be started." });
+  }
+});
+
+app.post("/api/upload/chunk", logUploadStart, receiveUploadChunk, (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No chunk provided." });
+    }
+
+    const uploadId = String(req.body.uploadId || "");
+    const uploadDir = getChunkUploadDir(uploadId);
+    if (!uploadDir || !fs.existsSync(uploadDir)) {
+      cleanupReceivedFiles(req);
+      return res.status(404).json({ error: "Chunked upload session not found." });
+    }
+
+    const chunkIndex = parseUploadInteger(req.body.chunkIndex);
+    const totalChunks = parseUploadInteger(req.body.totalChunks);
+    const totalSize = parseUploadInteger(req.body.totalSize);
+    validateEncryptedUploadSize(totalSize);
+
+    if (!Number.isSafeInteger(totalChunks) || totalChunks < 1) {
+      cleanupReceivedFiles(req);
+      return res.status(400).json({ error: "Total chunk count is invalid." });
+    }
+    if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) {
+      cleanupReceivedFiles(req);
+      return res.status(400).json({ error: "Chunk index is invalid." });
+    }
+
+    const chunkPath = getChunkFilePath(uploadDir, chunkIndex);
+    removeFileAtPath(chunkPath);
+    fs.renameSync(req.file.path, chunkPath);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Chunked upload chunk error:", err);
+    cleanupReceivedFiles(req);
+    res.status(err.status || 500).json({ error: err.publicMessage || "Upload chunk failed." });
+  }
+});
+
+app.post("/api/upload/complete", async (req, res) => {
+  const uploadId = String(req.body.uploadId || "");
+  const uploadDir = getChunkUploadDir(uploadId);
+  let finalPath = null;
+
+  try {
+    if (!uploadDir || !fs.existsSync(uploadDir)) {
+      return res.status(404).json({ error: "Chunked upload session not found." });
+    }
+
+    const totalChunks = parseUploadInteger(req.body.totalChunks);
+    const totalSize = parseUploadInteger(req.body.totalSize);
+    validateEncryptedUploadSize(totalSize);
+
+    if (!Number.isSafeInteger(totalChunks) || totalChunks < 1) {
+      return res.status(400).json({ error: "Total chunk count is invalid." });
+    }
+
+    let receivedSize = 0;
+    for (let index = 0; index < totalChunks; index += 1) {
+      const chunkPath = getChunkFilePath(uploadDir, index);
+      if (!fs.existsSync(chunkPath)) {
+        return res.status(400).json({ error: "Upload is missing one or more chunks." });
+      }
+      receivedSize += fs.statSync(chunkPath).size;
+    }
+
+    if (receivedSize !== totalSize) {
+      return res.status(400).json({ error: "Uploaded chunks do not match the expected size." });
+    }
+
+    const id = nanoid(16);
+    finalPath = path.join(UPLOAD_DIR, id);
+    await assembleChunks(uploadDir, totalChunks, finalPath);
+
+    const assembledSize = fs.statSync(finalPath).size;
+    if (assembledSize !== totalSize) {
+      throw httpError(400, "Assembled upload does not match the expected size.");
+    }
+
+    const result = await createFuseRecord({
+      id,
+      originalName: normalizeOriginalName(req.body.originalName),
+      finalPath,
+      size: assembledSize,
+      body: req.body,
+    });
+
+    removeChunkUploadDir(uploadDir);
+    res.json(result);
+    console.log(`Chunked upload stored: ${result.id} (${formatBytes(assembledSize)})`);
+  } catch (err) {
+    console.error("Chunked upload complete error:", err);
+    removeFileAtPath(finalPath);
+    res.status(err.status || 500).json({ error: err.publicMessage || "Upload could not be completed." });
+  }
 });
 
 app.post("/api/upload", logUploadStart, receiveUpload, async (req, res) => {
@@ -263,62 +558,21 @@ app.post("/api/upload", logUploadStart, receiveUpload, async (req, res) => {
     finalPath = path.join(UPLOAD_DIR, id);
     fs.renameSync(tmpPath, finalPath);
 
-    let passwordHash = null;
-    if (req.body.password && req.body.password.length > 0) {
-      passwordHash = await argon2.hash(req.body.password, {
-        type: argon2.argon2id,
-        memoryCost: 65536,
-        timeCost: 3,
-        parallelism: 1,
-      });
-    }
-
-    let expiresAt = null;
-    if (req.body.expiresAt) {
-      expiresAt = req.body.expiresAt;
-    }
-
-    let maxDownloads = null;
-    if (req.body.maxDownloads && parseInt(req.body.maxDownloads, 10) > 0) {
-      maxDownloads = parseInt(req.body.maxDownloads, 10);
-    }
-
-    const ownerToken = generateOwnerToken();
-    const ownerTokenHash = hashOwnerToken(ownerToken);
-
-    const claimRequired = parseBoolean(req.body.claimRequired, REQUIRE_CLAIM_CODE_DEFAULT);
-    const claimCode = claimRequired ? generateClaimCode() : null;
-    const claimCodeHash = claimCode
-      ? await argon2.hash(claimCode, argon2ClaimOptions)
-      : null;
-
-    db.insert.run({
+    const result = await createFuseRecord({
       id,
-      originalName: originalname,
-      filePath: finalPath,
+      originalName: normalizeOriginalName(originalname),
+      finalPath,
       size,
-      passwordHash,
-      maxDownloads,
-      expiresAt,
-      ownerTokenHash,
-      claimCodeHash,
-      claimRequired: claimRequired ? 1 : 0,
-      claimed: claimRequired ? 0 : 1,
+      body: req.body,
     });
 
-    res.json({
-      id,
-      url: `${BASE_URL}/d/${id}`,
-      ownerToken,
-      claimCode,
-      claimRequired,
-    });
-    console.log(`Upload stored: ${id} (${formatBytes(size)})`);
+    res.json(result);
+    console.log(`Upload stored: ${result.id} (${formatBytes(size)})`);
   } catch (err) {
     console.error("Upload error:", err);
     cleanupReceivedFiles(req);
     removeFileAtPath(finalPath);
-    res.status(500).json({ error: "Upload failed." });
+    res.status(err.status || 500).json({ error: err.publicMessage || "Upload failed." });
   }
 });
 
@@ -472,6 +726,24 @@ function runCleanup() {
   for (const fuse of expired) {
     console.log(`Blowing fuse: ${fuse.id} (${fuse.original_name})`);
     cleanupFuse(fuse);
+  }
+  cleanupExpiredChunkUploads();
+}
+
+function cleanupExpiredChunkUploads() {
+  if (!fs.existsSync(CHUNK_UPLOAD_DIR)) return;
+
+  const now = Date.now();
+  const entries = fs.readdirSync(CHUNK_UPLOAD_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const uploadDir = path.join(CHUNK_UPLOAD_DIR, entry.name);
+    const ageMs = now - fs.statSync(uploadDir).mtimeMs;
+    if (ageMs > CHUNK_UPLOAD_TTL_MS) {
+      console.log(`Removing incomplete chunked upload: ${entry.name}`);
+      removeChunkUploadDir(uploadDir);
+    }
   }
 }
 
