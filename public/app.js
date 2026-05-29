@@ -913,6 +913,41 @@
     }
   }
 
+  // Reads a fetch Response body chunk-by-chunk so callers can report real
+  // download progress. fetch() resolves once the headers arrive, so without
+  // this the whole body downloads invisibly inside a single await.
+  async function readResponseWithProgress(response, onProgress) {
+    const contentLength = Number(response.headers.get("Content-Length"));
+    const total = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0;
+
+    // Fall back to a plain read when the stream reader is unavailable.
+    if (!response.body || typeof response.body.getReader !== "function") {
+      const buffer = await response.arrayBuffer();
+      if (onProgress) onProgress(buffer.byteLength, total || buffer.byteLength);
+      return buffer;
+    }
+
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (onProgress) onProgress(received, total);
+    }
+
+    const result = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return result.buffer;
+  }
+
   async function performDownload() {
     const fuseId = currentDownloadState.fuseId;
     const keyString = currentDownloadState.keyString;
@@ -963,15 +998,24 @@
         return;
       }
 
-      setProgress(downloadProgressFill, 50, "Decrypting file in your browser");
-        announceStatus(downloadStatus, "Decrypting file.");
+      // Stream the body so the bar advances while the file downloads, instead
+      // of sitting frozen until the whole response has been buffered.
+      let lastShownPercent = -1;
+      const encryptedBuffer = await readResponseWithProgress(resp, function (loaded, total) {
+        if (!total) return;
+        const percent = Math.round(10 + (loaded / total) * 75);
+        if (percent !== lastShownPercent) {
+          lastShownPercent = percent;
+          setProgress(downloadProgressFill, percent, "Downloading encrypted file");
+        }
+      });
 
-      const encryptedBuffer = await resp.arrayBuffer();
-      setProgress(downloadProgressFill, 70, "Decrypting file in your browser");
+      setProgress(downloadProgressFill, 88, "Decrypting file in your browser");
+      announceStatus(downloadStatus, "Decrypting file.");
 
       const key = await importKey(keyString);
       const decrypted = await decryptData(encryptedBuffer, key);
-      setProgress(downloadProgressFill, 90, "Preparing file");
+      setProgress(downloadProgressFill, 96, "Preparing file");
       announceStatus(downloadStatus, "Preparing file.");
 
       // Extract filename from Content-Disposition header
