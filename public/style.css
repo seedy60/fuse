@@ -72,6 +72,26 @@ header {
 header nav {
   max-width: var(--max-width);
   margin: 0 auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.nav-link {
+  color: var(--color-text);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.nav-link:hover {
+  color: var(--color-primary);
+}
+
+.nav-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
 }
 
 .logo {
@@ -465,6 +485,82 @@ button.danger:hover:not(:disabled) {
 #claim-prompt,
 #password-prompt {
   margin-top: 1rem;
+}
+
+/* --- Account --- */
+.account-panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin: 1.5rem 0;
+}
+
+.account-panel.danger-panel {
+  border-color: var(--color-danger);
+}
+
+.panel-heading {
+  font-size: 1.1rem;
+  margin: 0 0 0.5rem;
+}
+
+#new-number {
+  font-size: 1.05rem;
+  letter-spacing: 0.08em;
+}
+
+.fuse-item {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin: 0.75rem 0;
+}
+
+.fuse-item-name {
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+  word-break: break-word;
+}
+
+.fuse-item-meta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.fuse-item button {
+  flex-shrink: 0;
+}
+
+.fuse-item-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.fuse-empty {
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 480px) {
+  .fuse-item {
+    flex-direction: column;
+  }
+
+  .fuse-item-actions {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .fuse-item button {
+    width: 100%;
+  }
 }
 
 /* --- Footer --- */

@@ -12,7 +12,8 @@
   <a href="#main-content" class="sr-only skip-link">Skip to main content</a>
   <header>
     <nav aria-label="Main">
-      <a href="/" class="logo" aria-label="Fuse home">Fuse</a>
+      <a href="/" class="logo" aria-label="Fuse home" data-instance-name>Fuse</a>
+      <a href="/account" class="nav-link">Account</a>
     </nav>
   </header>
 
@@ -21,6 +22,8 @@
     <section id="upload-view" aria-labelledby="upload-heading">
       <h1 id="upload-heading">Share files securely</h1>
       <p class="tagline">End-to-end encrypted. Set a fuse. Files self-destruct.</p>
+      <p id="account-optional-notice" class="hint">No account needed to share a file. <a href="/account">Accounts</a> are optional &mdash; they just give you an easy way to keep track of and manage your fuses.</p>
+      <p id="account-indicator" class="hint" hidden>Logged in &mdash; this upload will be saved to your <a href="/account">account</a>.</p>
 
       <form id="upload-form" novalidate>
         <label class="drop-zone" id="drop-zone" for="file-input">
@@ -198,9 +201,11 @@
   </main>
 
   <footer>
-    <p>Fuse &mdash; Files, Uploaded Securely, Encrypted</p>
+    <p><span data-instance-name>Fuse</span> &mdash; Files, Uploaded Securely, Encrypted</p>
   </footer>
 
+  <script src="/branding.js"></script>
+  <script src="/crypto.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

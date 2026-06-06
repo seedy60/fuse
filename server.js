@@ -16,6 +16,7 @@ const MAX_FILE_SIZE = parseInt(process.env.FUSE_MAX_FILE_SIZE, 10) || 524288000;
 const BASE_URL = (process.env.FUSE_BASE_URL || `http://localhost:${PORT}`)
   .replace(/\\(?=\/)/g, "")
   .replace(/\/+$/, "");
+const INSTANCE_NAME = process.env.FUSE_INSTANCE_NAME || "Fuse";
 const UPLOAD_DIR = process.env.FUSE_UPLOAD_DIR || path.join(__dirname, "uploads");
 const CHUNK_UPLOAD_DIR = path.join(UPLOAD_DIR, ".chunks");
 const CLEANUP_INTERVAL = (parseInt(process.env.FUSE_CLEANUP_INTERVAL, 10) || 10) * 60 * 1000;
@@ -26,13 +27,41 @@ const CLAIM_WINDOW_MS = (parseInt(process.env.FUSE_CLAIM_WINDOW_MINUTES, 10) || 
 const CLAIM_BLOCK_MS = (parseInt(process.env.FUSE_CLAIM_BLOCK_MINUTES, 10) || 30) * 60 * 1000;
 const SSL_CERT = process.env.FUSE_SSL_CERT;
 const SSL_KEY = process.env.FUSE_SSL_KEY;
-const ENCRYPTED_FILE_OVERHEAD_BYTES = 28; // 12-byte IV + 16-byte AES-GCM auth tag.
+// The v2 chunked format adds a 17-byte header + a 16-byte GCM tag per chunk.
+// Allow a generous fixed overhead (far above the worst case even at MAX_FILE_SIZE)
+// so large multi-chunk uploads are never rejected just for their framing bytes.
+const ENCRYPTED_FILE_OVERHEAD_BYTES = 1024 * 1024;
 const UPLOAD_TIMEOUT_MINUTES = parseNonNegativeInteger(process.env.FUSE_UPLOAD_TIMEOUT_MINUTES, 60);
 const UPLOAD_TIMEOUT_MS = UPLOAD_TIMEOUT_MINUTES === 0 ? 0 : UPLOAD_TIMEOUT_MINUTES * 60 * 1000;
 const UPLOAD_CHUNK_SIZE_BYTES = parseNonNegativeInteger(process.env.FUSE_UPLOAD_CHUNK_SIZE_BYTES, 33554432) || 33554432;
 const UPLOAD_CHUNK_PARSER_LIMIT_BYTES = UPLOAD_CHUNK_SIZE_BYTES + 1048576;
 const CHUNK_UPLOAD_TTL_HOURS = parseNonNegativeInteger(process.env.FUSE_CHUNK_UPLOAD_TTL_HOURS, 24) || 24;
 const CHUNK_UPLOAD_TTL_MS = CHUNK_UPLOAD_TTL_HOURS * 60 * 60 * 1000;
+
+// --- Account system configuration ---
+// Dedicated secrets, kept separate from the owner-token pepper and given their
+// own domains. These constants are consumed by later phases (crypto helpers,
+// endpoints, rate limiting); declared here so all config lives in one place.
+const ACCOUNT_PEPPER = process.env.FUSE_ACCOUNT_PEPPER || "";
+const SESSION_SECRET_FROM_ENV = Boolean(process.env.FUSE_SESSION_SECRET);
+const SESSION_SECRET = process.env.FUSE_SESSION_SECRET || crypto.randomBytes(32).toString("hex");
+// Account numbers are saved, not memorized, so there is no reason to stay at
+// Mullvad's 16 digits. Default to 20 (~2^66); floor at 16 to keep the keyspace
+// large even if an operator lowers it.
+const ACCOUNT_NUMBER_DIGITS = Math.max(16, parseNonNegativeInteger(process.env.FUSE_ACCOUNT_NUMBER_DIGITS, 20) || 20);
+const ACCOUNT_SESSION_TTL_MS = (parseNonNegativeInteger(process.env.FUSE_ACCOUNT_SESSION_TTL_MINUTES, 30) || 30) * 60 * 1000;
+// "Remember me" duration. 0 disables the option; the client hides the checkbox.
+const ACCOUNT_REMEMBER_DAYS = parseNonNegativeInteger(process.env.FUSE_ACCOUNT_REMEMBER_DAYS, 30);
+const ACCOUNT_REMEMBER_MS = ACCOUNT_REMEMBER_DAYS * 24 * 60 * 60 * 1000;
+// Per-IP login triage only. It is the cheap first filter, not the security
+// boundary: the real wall is the keyspace, server-side argon2, and a global
+// concurrency cap added in a later phase.
+const ACCOUNT_LOGIN_MAX_ATTEMPTS = parseNonNegativeInteger(process.env.FUSE_ACCOUNT_LOGIN_MAX_ATTEMPTS, 10) || 10;
+const ACCOUNT_LOGIN_WINDOW_MS = (parseNonNegativeInteger(process.env.FUSE_ACCOUNT_LOGIN_WINDOW_MINUTES, 15) || 15) * 60 * 1000;
+const ACCOUNT_LOGIN_BLOCK_MS = (parseNonNegativeInteger(process.env.FUSE_ACCOUNT_LOGIN_BLOCK_MINUTES, 30) || 30) * 60 * 1000;
+const ACCOUNT_LOGIN_MAX_CONCURRENT = parseNonNegativeInteger(process.env.FUSE_ACCOUNT_LOGIN_MAX_CONCURRENT, 4) || 4;
+const ACCOUNT_LOGIN_MAX_QUEUE = parseNonNegativeInteger(process.env.FUSE_ACCOUNT_LOGIN_MAX_QUEUE, 20) || 20;
+const TRUST_PROXY = parseTrustProxy(process.env.FUSE_TRUST_PROXY);
 
 for (const dir of [UPLOAD_DIR, CHUNK_UPLOAD_DIR]) {
   if (!fs.existsSync(dir)) {
@@ -41,6 +70,11 @@ for (const dir of [UPLOAD_DIR, CHUNK_UPLOAD_DIR]) {
 }
 
 const app = express();
+// Behind a reverse proxy this must be set so req.ip is the real client address
+// (used by the claim-code and account-login limiters). Default false trusts only
+// the direct socket. Do NOT set this to "true" blindly — that trusts a spoofable
+// X-Forwarded-For; use the hop count or your proxy's address instead.
+app.set("trust proxy", TRUST_PROXY);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -67,10 +101,29 @@ if (!TOKEN_PEPPER) {
   console.warn("FUSE_TOKEN_PEPPER is not set. Set it in .env for stronger token hashing.");
 }
 
+if (!ACCOUNT_PEPPER) {
+  console.warn("FUSE_ACCOUNT_PEPPER is not set. Set it in .env for stronger account-number hashing.");
+}
+
+if (!SESSION_SECRET_FROM_ENV) {
+  console.warn("FUSE_SESSION_SECRET is not set. Using a random secret; account sessions will not survive a restart.");
+}
+
 function parseNonNegativeInteger(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+// Express "trust proxy" setting. Accepts a hop count, true/false, or an
+// IP/subnet/list (or "loopback"). Default false: trust only the direct socket.
+function parseTrustProxy(value) {
+  if (value === undefined || value === null || value === "") return false;
+  const normalized = String(value).trim();
+  if (normalized.toLowerCase() === "true") return true;
+  if (normalized.toLowerCase() === "false") return false;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  return normalized;
 }
 
 function formatBytes(bytes) {
@@ -159,6 +212,44 @@ function resetClaimFailures(fuseId, req) {
   claimAttemptState.delete(key);
 }
 
+// Per-IP account-login limiter. This is cheap triage only; it shares the
+// reverse-proxy caveat of the claim limiter (fixed in a later phase) and is not
+// the real brute-force wall (keyspace + argon2 + a global cap are).
+const loginAttemptState = new Map();
+
+function getLoginAttemptKey(req) {
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
+
+function isLoginBlocked(req) {
+  const state = loginAttemptState.get(getLoginAttemptKey(req));
+  if (!state) return false;
+  const now = Date.now();
+  if (state.blockedUntil && now < state.blockedUntil) return true;
+  if (state.blockedUntil && now >= state.blockedUntil) {
+    loginAttemptState.delete(getLoginAttemptKey(req));
+  }
+  return false;
+}
+
+function registerLoginFailure(req) {
+  const key = getLoginAttemptKey(req);
+  const now = Date.now();
+  let state = loginAttemptState.get(key);
+  if (!state || now > state.windowEndsAt) {
+    state = { count: 0, windowEndsAt: now + ACCOUNT_LOGIN_WINDOW_MS, blockedUntil: 0 };
+  }
+  state.count += 1;
+  if (state.count >= ACCOUNT_LOGIN_MAX_ATTEMPTS) {
+    state.blockedUntil = now + ACCOUNT_LOGIN_BLOCK_MS;
+  }
+  loginAttemptState.set(key, state);
+}
+
+function resetLoginFailures(req) {
+  loginAttemptState.delete(getLoginAttemptKey(req));
+}
+
 async function verifyClaimCode(claimCode, storedHash) {
   if (!storedHash) return false;
   if (storedHash.startsWith("$argon2")) {
@@ -166,6 +257,101 @@ async function verifyClaimCode(claimCode, storedHash) {
   }
   // Backward compatibility for old rows that used SHA-256.
   return safeHashEquals(hashSecret(claimCode), storedHash);
+}
+
+// --- Account helpers ---
+// Accounts are zero-knowledge: the browser generates the account number and
+// derives a login authenticator from it (PBKDF2 + HKDF, in /crypto.js). The
+// server only ever sees the authenticator, never the number, so the helpers
+// below operate on the authenticator as the credential.
+
+// Rejects anything that is not a well-formed authenticator before any HMAC or
+// argon2 work. The authenticator is a 256-bit value, base64url-encoded (43 chars).
+function normalizeAuthenticator(input) {
+  const value = String(input || "").trim();
+  return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : null;
+}
+
+// Deterministic, peppered, domain-separated lookup key for O(1) login. An
+// argon2 hash can't be looked up (random salt), so this indexes the row; the
+// pepper stops a leaked DB from being scanned with a precomputed table.
+function hashAccountLookup(accountNumber) {
+  return crypto.createHmac("sha256", ACCOUNT_PEPPER).update("account:" + accountNumber, "utf8").digest("hex");
+}
+
+function hashAccountNumber(accountNumber) {
+  return argon2.hash(accountNumber, argon2ClaimOptions);
+}
+
+async function verifyAccountNumberHash(accountNumber, verifyHash) {
+  try {
+    return await argon2.verify(verifyHash, accountNumber);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Precomputed once so that a login for a non-existent account still pays the
+// full argon2 cost; otherwise response timing would reveal which numbers exist.
+const decoyVerifyHashPromise = argon2.hash(crypto.randomBytes(32).toString("hex"), argon2ClaimOptions);
+// Mark handled so an (unexpected) startup failure isn't a fatal unhandled
+// rejection; real awaiters below still observe the error and fail closed.
+decoyVerifyHashPromise.catch(() => {});
+
+// Always runs argon2 whether or not the account exists (constant existence).
+async function verifyAccountConstantTime(accountNumber, account) {
+  const hashToCheck = account ? account.verify_hash : await decoyVerifyHashPromise;
+  const matches = await verifyAccountNumberHash(accountNumber, hashToCheck);
+  return Boolean(account) && matches;
+}
+
+// --- Account sessions (stateless, HMAC-signed, carried in the Authorization header) ---
+
+function signSessionPayload(payloadB64) {
+  return crypto.createHmac("sha256", SESSION_SECRET).update(payloadB64, "utf8").digest("base64url");
+}
+
+function issueSessionToken(accountId, ttlMs) {
+  const expiresAt = Date.now() + (ttlMs || ACCOUNT_SESSION_TTL_MS);
+  const payloadB64 = Buffer.from(`${accountId}.${expiresAt}`, "utf8").toString("base64url");
+  return { token: `${payloadB64}.${signSessionPayload(payloadB64)}`, expiresAt };
+}
+
+function verifySessionToken(token) {
+  if (typeof token !== "string" || !token) return null;
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+
+  const expectedSig = Buffer.from(signSessionPayload(parts[0]));
+  const providedSig = Buffer.from(parts[1]);
+  if (providedSig.length !== expectedSig.length || !crypto.timingSafeEqual(providedSig, expectedSig)) {
+    return null;
+  }
+
+  const payload = Buffer.from(parts[0], "base64url").toString("utf8");
+  const sep = payload.lastIndexOf(".");
+  if (sep === -1) return null;
+
+  const accountId = payload.slice(0, sep);
+  const expiresAt = Number(payload.slice(sep + 1));
+  if (!accountId || !Number.isFinite(expiresAt) || Date.now() > expiresAt) {
+    return null;
+  }
+  return { accountId, expiresAt };
+}
+
+function getSessionFromRequest(req) {
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  return match ? verifySessionToken(match[1].trim()) : null;
+}
+
+function requireAccount(req, res, next) {
+  const session = getSessionFromRequest(req);
+  if (!session) {
+    return res.status(401).json({ error: "Account session is invalid or expired.", needsLogin: true });
+  }
+  req.accountId = session.accountId;
+  next();
 }
 
 function parseBoolean(value, defaultValue) {
@@ -390,6 +576,16 @@ async function createFuseRecord(options) {
   };
 }
 
+// Links a freshly-stored fuse to the uploader's account when they are logged in.
+// No/invalid token, or an account deleted since the token was issued, leaves the
+// fuse anonymous (account_id NULL) — accounts are strictly optional.
+function associateFuseWithAccount(req, fuseId) {
+  const session = getSessionFromRequest(req);
+  if (session && db.getAccountById.get(session.accountId)) {
+    db.setFuseAccount.run(session.accountId, fuseId);
+  }
+}
+
 function isFuseUnavailable(fuse) {
   if (!fuse) {
     return { unavailable: true, status: 404, error: "Share link not found." };
@@ -412,9 +608,12 @@ function isFuseUnavailable(fuse) {
 
 app.get("/api/config", (req, res) => {
   res.json({
+    instanceName: INSTANCE_NAME,
     maxFileSize: MAX_FILE_SIZE,
     uploadChunkSize: UPLOAD_CHUNK_SIZE_BYTES,
     requireClaimCodeDefault: REQUIRE_CLAIM_CODE_DEFAULT,
+    accountNumberDigits: ACCOUNT_NUMBER_DIGITS,
+    rememberDays: ACCOUNT_REMEMBER_DAYS,
   });
 });
 
@@ -532,6 +731,7 @@ app.post("/api/upload/complete", async (req, res) => {
       size: assembledSize,
       body: req.body,
     });
+    associateFuseWithAccount(req, result.id);
 
     removeChunkUploadDir(uploadDir);
     res.json(result);
@@ -565,6 +765,7 @@ app.post("/api/upload", logUploadStart, receiveUpload, async (req, res) => {
       size,
       body: req.body,
     });
+    associateFuseWithAccount(req, result.id);
 
     res.json(result);
     console.log(`Upload stored: ${result.id} (${formatBytes(size)})`);
@@ -704,12 +905,204 @@ app.post("/api/fuse/:id/download", express.json(), async (req, res) => {
   stream.pipe(res);
 });
 
+// --- Account API Routes ---
+
+// Bounded-concurrency gate. `release()` hands a held slot directly to the next
+// waiter, so `active` never exceeds maxActive; once the queue is full, acquire()
+// returns null and the caller is shed with a 503.
+function createConcurrencyLimiter(maxActive, maxQueue) {
+  let active = 0;
+  const queue = [];
+  return {
+    acquire() {
+      if (active < maxActive) {
+        active += 1;
+        return Promise.resolve();
+      }
+      if (queue.length >= maxQueue) {
+        return null;
+      }
+      return new Promise((resolve) => { queue.push(resolve); });
+    },
+    release() {
+      const next = queue.shift();
+      if (next) {
+        next();
+      } else {
+        active -= 1;
+      }
+    },
+  };
+}
+
+// Caps concurrent account-number argon2 work server-wide. Being independent of
+// source IP, this is the real brute-force ceiling: rotating through VPNs/proxies
+// cannot raise the total guess rate past what one server can hash. The per-IP
+// limiter is just cheap triage in front of it. This is the deliberate primary
+// anti-abuse mechanism: no CAPTCHA or proof-of-work — those are inaccessible to
+// many users, and redundant given this cap plus the ~2^66 account-number keyspace.
+const argon2Slots = createConcurrencyLimiter(ACCOUNT_LOGIN_MAX_CONCURRENT, ACCOUNT_LOGIN_MAX_QUEUE);
+
+function limitArgon2Concurrency(req, res, next) {
+  const slot = argon2Slots.acquire();
+  if (!slot) {
+    return res.status(503).json({ error: "The server is busy. Please try again in a moment." });
+  }
+  let released = false;
+  const release = function () {
+    if (released) return;
+    released = true;
+    argon2Slots.release();
+  };
+  res.on("finish", release);
+  res.on("close", release);
+  slot.then(next);
+}
+
+app.post("/api/account/create", limitArgon2Concurrency, async (req, res) => {
+  const authenticator = normalizeAuthenticator(req.body && req.body.authenticator);
+  if (!authenticator) {
+    return res.status(400).json({ error: "A valid account authenticator is required." });
+  }
+  try {
+    const id = nanoid(16);
+    const verifyHash = await hashAccountNumber(authenticator);
+    db.insertAccount.run({ id, lookupHash: hashAccountLookup(authenticator), verifyHash });
+
+    const remember = Boolean(req.body && req.body.remember) && ACCOUNT_REMEMBER_MS > 0;
+    const { token, expiresAt } = issueSessionToken(id, remember ? ACCOUNT_REMEMBER_MS : ACCOUNT_SESSION_TTL_MS);
+    console.log(`Account created: ${id}`);
+    // No account number is sent or stored. The client generated it and derived
+    // this authenticator from it; the server never sees the number itself.
+    res.json({ sessionToken: token, expiresAt });
+  } catch (err) {
+    // A UNIQUE violation means the same number was generated twice (astronomically
+    // unlikely); the client can retry with a fresh number.
+    console.error("Account create error:", err);
+    res.status(500).json({ error: "Could not create account. Please try again." });
+  }
+});
+
+app.post("/api/account/login", limitArgon2Concurrency, async (req, res) => {
+  if (isLoginBlocked(req)) {
+    return res.status(429).json({ error: "Too many login attempts. Please try again later." });
+  }
+
+  const authenticator = normalizeAuthenticator(req.body && req.body.authenticator);
+  if (!authenticator) {
+    registerLoginFailure(req);
+    return res.status(400).json({ error: "A valid account authenticator is required." });
+  }
+
+  // Look up by deterministic HMAC, then verify. verifyAccountConstantTime always
+  // runs argon2 (against a decoy when the row is missing), so a wrong credential
+  // and a non-existent one are indistinguishable by timing or response.
+  const account = db.getAccountByLookup.get(hashAccountLookup(authenticator));
+  const valid = await verifyAccountConstantTime(authenticator, account);
+  if (!valid) {
+    registerLoginFailure(req);
+    return res.status(403).json({ error: "Account number is incorrect." });
+  }
+
+  resetLoginFailures(req);
+  const remember = Boolean(req.body && req.body.remember) && ACCOUNT_REMEMBER_MS > 0;
+  const { token, expiresAt } = issueSessionToken(account.id, remember ? ACCOUNT_REMEMBER_MS : ACCOUNT_SESSION_TTL_MS);
+  res.json({ sessionToken: token, expiresAt });
+});
+
+app.get("/api/account/fuses", requireAccount, (req, res) => {
+  const fuses = [];
+  for (const fuse of db.getActiveFusesByAccount.all(req.accountId)) {
+    // Reuse the download availability check; it also purges expired/over-limit
+    // fuses, which is exactly the "expired fuses auto-removed" behaviour we want.
+    if (isFuseUnavailable(fuse).unavailable) continue;
+    fuses.push({
+      id: fuse.id,
+      originalName: fuse.original_name,
+      size: fuse.size,
+      maxDownloads: fuse.max_downloads,
+      downloadCount: fuse.download_count,
+      expiresAt: fuse.expires_at,
+      createdAt: fuse.created_at,
+      claimRequired: !!fuse.claim_required,
+      claimed: !!fuse.claimed,
+      vaultBlob: fuse.vault_blob || null,
+    });
+  }
+  res.json({ fuses });
+});
+
+app.post("/api/account/fuses/:id/blow", requireAccount, (req, res) => {
+  const fuse = db.getFuseByIdAndAccount.get(req.params.id, req.accountId);
+  if (!fuse) {
+    return res.status(404).json({ error: "Fuse not found for this account." });
+  }
+  if (!fuse.blown) {
+    cleanupFuse(fuse);
+  }
+  res.json({ ok: true, message: "Fuse blown." });
+});
+
+app.post("/api/account/vault", requireAccount, (req, res) => {
+  const fuseId = req.body && req.body.fuseId;
+  const blob = req.body && req.body.blob;
+  // The blob is opaque client-encrypted ciphertext; the server only checks it is
+  // a small string it can store, never reads it.
+  if (typeof fuseId !== "string" || typeof blob !== "string" || !blob || blob.length > 8192) {
+    return res.status(400).json({ error: "Invalid vault entry." });
+  }
+  if (!db.getFuseByIdAndAccount.get(fuseId, req.accountId)) {
+    return res.status(404).json({ error: "Fuse not found for this account." });
+  }
+  db.setFuseVault.run(blob, fuseId, req.accountId);
+  res.json({ ok: true });
+});
+
+app.post("/api/account/delete", requireAccount, async (req, res) => {
+  const account = db.getAccountById.get(req.accountId);
+  if (!account) {
+    return res.status(404).json({ error: "Account not found." });
+  }
+
+  // Re-authenticate with the account number (the client sends the authenticator
+  // derived from it): an irreversible, destructive action must not be possible
+  // with only a borrowed/stolen session token.
+  const authenticator = normalizeAuthenticator(req.body && req.body.authenticator);
+  if (!authenticator) {
+    return res.status(400).json({ error: "Re-enter your account number to confirm deletion." });
+  }
+  if (!(await verifyAccountConstantTime(authenticator, account))) {
+    return res.status(403).json({ error: "Account number is incorrect." });
+  }
+
+  // Crypto-shred: unlink ciphertext files (best-effort), then remove the fuse
+  // rows and the account. Only one-way hashes were ever stored, so deleting the
+  // rows is the wipe; residual bytes are useless ciphertext.
+  const fuses = db.getFusesByAccount.all(req.accountId);
+  for (const fuse of fuses) {
+    try {
+      removeFileAtPath(fuse.file_path);
+    } catch (err) {
+      console.warn(`Account delete: could not remove file for fuse ${fuse.id}: ${err.message}`);
+    }
+  }
+  db.deleteFusesByAccount.run(req.accountId);
+  db.deleteAccount.run(req.accountId);
+
+  console.log(`Account deleted: ${req.accountId} (${fuses.length} fuses removed)`);
+  res.json({ ok: true, message: "Account and all fuses deleted." });
+});
+
 app.get("/d/:id", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.get("/revoke/:id", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "revoke.html"));
+});
+
+app.get("/account", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "account.html"));
 });
 
 // --- Cleanup ---
@@ -747,8 +1140,6 @@ function cleanupExpiredChunkUploads() {
   }
 }
 
-setInterval(runCleanup, CLEANUP_INTERVAL);
-
 // --- Start Server ---
 
 let server;
@@ -764,10 +1155,30 @@ if (SSL_CERT && SSL_KEY) {
 
 server.requestTimeout = UPLOAD_TIMEOUT_MS;
 
-server.listen(PORT, () => {
-  const protocol = SSL_CERT && SSL_KEY ? "https" : "http";
-  console.log(`Fuse is running at ${protocol}://localhost:${PORT}`);
-  console.log(`Max file size: ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)} MB`);
-  console.log(`Upload request timeout: ${UPLOAD_TIMEOUT_MINUTES === 0 ? "disabled" : `${UPLOAD_TIMEOUT_MINUTES} minutes`}`);
-  runCleanup();
-});
+// Only bind the port and start the cleanup timer when run directly. Importing
+// this file (e.g. from a test) exposes the helpers below without side effects.
+if (require.main === module) {
+  setInterval(runCleanup, CLEANUP_INTERVAL);
+  server.listen(PORT, () => {
+    const protocol = SSL_CERT && SSL_KEY ? "https" : "http";
+    console.log(`${INSTANCE_NAME} is running at ${protocol}://localhost:${PORT}`);
+    console.log(`Max file size: ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(0)} MB`);
+    console.log(`Upload request timeout: ${UPLOAD_TIMEOUT_MINUTES === 0 ? "disabled" : `${UPLOAD_TIMEOUT_MINUTES} minutes`}`);
+    runCleanup();
+  });
+}
+
+module.exports = {
+  app,
+  parseTrustProxy,
+  normalizeAuthenticator,
+  hashAccountLookup,
+  hashAccountNumber,
+  verifyAccountNumberHash,
+  verifyAccountConstantTime,
+  signSessionPayload,
+  issueSessionToken,
+  verifySessionToken,
+  getSessionFromRequest,
+  requireAccount,
+};

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Account &mdash; Fuse</title>
+  <meta name="description" content="Your optional, privacy-first Fuse account. No email, no name — just a private account number.">
+  <meta name="color-scheme" content="dark light">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a href="#main-content" class="sr-only skip-link">Skip to main content</a>
+  <header>
+    <nav aria-label="Main">
+      <a href="/" class="logo" aria-label="Fuse home" data-instance-name>Fuse</a>
+    </nav>
+  </header>
+
+  <main id="main-content" tabindex="-1">
+    <!-- Gate: create or log in -->
+    <section id="gate-view" aria-labelledby="gate-heading">
+      <h1 id="gate-heading" tabindex="-1">Your account</h1>
+      <p class="tagline">Optional. No email, no name &mdash; just a private account number to keep track of your fuses and blow them anytime.</p>
+
+      <div class="account-panel">
+        <h2 class="panel-heading">New here?</h2>
+        <p class="hint">We generate a <span data-account-digits>20</span>-digit account number. It is the only way in &mdash; we never ask for anything that identifies you.</p>
+        <div class="actions-row">
+          <button type="button" id="create-btn">Create a new account</button>
+        </div>
+        <div id="create-error" class="field-error" role="alert"></div>
+      </div>
+
+      <div class="account-panel">
+        <h2 class="panel-heading">Already have an account number?</h2>
+        <form id="login-form" novalidate>
+          <div class="field-group">
+            <label for="login-number">Account number</label>
+            <input type="password" id="login-number" autocomplete="off" inputmode="numeric" spellcheck="false" aria-describedby="login-error login-hint">
+            <p id="login-hint" class="hint"><span data-account-digits>20</span> digits. Spaces and dashes are ignored.</p>
+          </div>
+          <div class="actions-row">
+            <button type="submit" id="login-btn">Log in</button>
+          </div>
+          <div id="login-error" class="field-error" role="alert"></div>
+        </form>
+      </div>
+
+      <div id="remember-row" hidden>
+        <div class="field-group checkbox-row">
+          <input type="checkbox" id="remember-me">
+          <label for="remember-me">Remember me on this device for <span data-remember-days>30</span> days</label>
+        </div>
+        <p class="hint warning">Keeps you signed in on this device. Don't use it on shared or public computers.</p>
+      </div>
+
+      <span id="gate-status" class="sr-only" role="status" aria-live="polite"></span>
+    </section>
+
+    <!-- Created: save the number before continuing -->
+    <section id="created-view" hidden aria-labelledby="created-heading">
+      <h1 id="created-heading" tabindex="-1">Save your account number</h1>
+      <p class="tagline">This is the only way to access your account.</p>
+
+      <div class="link-box stack">
+        <label for="new-number">Your account number</label>
+        <div class="row">
+          <input type="text" id="new-number" readonly>
+          <button type="button" id="copy-number-btn">Copy</button>
+        </div>
+      </div>
+
+      <div class="actions-row">
+        <button type="button" id="download-number-btn" class="secondary">Download recovery sheet</button>
+        <button type="button" id="print-number-btn" class="secondary">Print</button>
+      </div>
+
+      <p class="hint warning">We cannot reset it, email it, or look it up. If you lose it the account is gone &mdash; but the share links and revoke tokens you already saved keep working on their own.</p>
+
+      <form id="confirm-form" novalidate>
+        <div class="field-group">
+          <label for="confirm-number">Re-enter your account number to confirm you saved it</label>
+          <input type="password" id="confirm-number" autocomplete="off" inputmode="numeric" spellcheck="false" aria-describedby="confirm-error">
+        </div>
+        <div class="actions-row">
+          <button type="submit" id="confirm-btn">Continue to my account</button>
+        </div>
+        <div id="confirm-error" class="field-error" role="alert"></div>
+      </form>
+
+      <span id="created-status" class="sr-only" role="status" aria-live="polite"></span>
+    </section>
+
+    <!-- Dashboard -->
+    <section id="dashboard-view" hidden aria-labelledby="dashboard-heading">
+      <h1 id="dashboard-heading" tabindex="-1">Your fuses</h1>
+      <p class="tagline">Files you uploaded while logged in. Expired fuses drop off automatically.</p>
+
+      <div class="actions-row">
+        <button type="button" id="refresh-btn" class="secondary">Refresh</button>
+        <button type="button" id="logout-btn" class="secondary">Log out</button>
+      </div>
+
+      <div id="fuse-list"></div>
+
+      <div class="account-panel danger-panel">
+        <h2 class="panel-heading">Delete account</h2>
+        <p class="hint">Permanently deletes your account and blows every fuse you created. This cannot be undone.</p>
+        <div class="actions-row">
+          <button type="button" id="delete-toggle-btn" class="danger">Delete my account</button>
+        </div>
+        <form id="delete-form" hidden novalidate>
+          <div class="field-group">
+            <label for="delete-number">Re-enter your account number to confirm</label>
+            <input type="password" id="delete-number" autocomplete="off" inputmode="numeric" spellcheck="false" aria-describedby="delete-error">
+          </div>
+          <div class="actions-row">
+            <button type="submit" id="delete-confirm-btn" class="danger">Permanently delete</button>
+            <button type="button" id="delete-cancel-btn" class="secondary">Cancel</button>
+          </div>
+          <div id="delete-error" class="field-error" role="alert"></div>
+        </form>
+      </div>
+
+      <span id="dashboard-status" class="sr-only" role="status" aria-live="polite"></span>
+    </section>
+  </main>
+
+  <footer>
+    <p><span data-instance-name>Fuse</span> &mdash; Files, Uploaded Securely, Encrypted</p>
+  </footer>
+
+  <script src="/branding.js"></script>
+  <script src="/crypto.js"></script>
+  <script src="/account.js"></script>
+</body>
+</html>

@@ -33,6 +33,8 @@
   const progressText = document.getElementById("progress-text");
   const formError = document.getElementById("form-error");
   const uploadStatus = document.getElementById("upload-status");
+  const accountIndicator = document.getElementById("account-indicator");
+  const accountOptionalNotice = document.getElementById("account-optional-notice");
 
   const shareLink = document.getElementById("share-link");
   const shareKey = document.getElementById("share-key");
@@ -72,8 +74,19 @@
   const downloadError = document.getElementById("download-error");
   const downloadHeading = document.getElementById("download-heading");
 
-  const BASE_TITLE = "Fuse \u2014 Secure File Transfer";
+  function instanceName() {
+    return (window.FuseBranding && window.FuseBranding.name) || "Fuse";
+  }
+
+  function baseTitle() {
+    return instanceName() + " \u2014 Secure File Transfer";
+  }
   const DEFAULT_UPLOAD_CHUNK_SIZE = 33554432;
+  const ACCOUNT_SESSION_KEY = "fuseAccountSession";
+  // Above this size, stream the download straight to disk (File System Access)
+  // to dodge the browser's ~2 GiB blob-download limit. Smaller files use the
+  // seamless anchor download — no save dialog, no file-access prompt.
+  const STREAM_TO_DISK_THRESHOLD = 1610612736; // 1.5 GiB
 
   let selectedFile = null;
   let configuredMaxFileSize = null;
@@ -83,63 +96,11 @@
   let currentDownloadState = {
     fuseId: "",
     keyString: "",
+    originalName: "",
+    size: 0,
     requiresPassword: false,
     requiresClaim: false,
   };
-
-  // --- Crypto Helpers (Web Crypto API, AES-256-GCM) ---
-
-  async function generateKey() {
-    return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
-  }
-
-  async function exportKey(key) {
-    const raw = await crypto.subtle.exportKey("raw", key);
-    return bufferToBase64Url(raw);
-  }
-
-  async function importKey(base64Url) {
-    const raw = base64UrlToBuffer(base64Url);
-    return crypto.subtle.importKey("raw", raw, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-  }
-
-  async function encryptFile(file, key) {
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const data = await file.arrayBuffer();
-    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
-    // Prepend IV to ciphertext so we can extract it on decrypt
-    const combined = new Uint8Array(iv.length + encrypted.byteLength);
-    combined.set(iv, 0);
-    combined.set(new Uint8Array(encrypted), iv.length);
-    return combined;
-  }
-
-  async function decryptData(combinedBuffer, key) {
-    const combined = new Uint8Array(combinedBuffer);
-    const iv = combined.slice(0, 12);
-    const ciphertext = combined.slice(12);
-    return crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
-  }
-
-  function bufferToBase64Url(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
-
-  function base64UrlToBuffer(base64Url) {
-    const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-    const binary = atob(padded);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes.buffer;
-  }
 
   // --- Utility ---
 
@@ -415,20 +376,11 @@
     setProgress(progressFill, 10, "Encrypting file in your browser");
 
     try {
-      // 1. Generate encryption key
-      const key = await generateKey();
-      const keyString = await exportKey(key);
+      // 1. Generate a per-file key. It lives only in the share-link fragment.
+      const key = await FuseCrypto.generateKey();
+      const keyString = await FuseCrypto.exportKey(key);
 
-      // 2. Encrypt file client-side
-      setProgress(progressFill, 20, "Encrypting file in your browser");
-      const encryptedData = await encryptFile(selectedFile, key);
-      announceUploadStatus("Uploading encrypted file.");
-      setProgress(progressFill, 50, "Uploading encrypted file");
-
-      // 3. Build upload metadata
-      const blob = new Blob([encryptedData], { type: "application/octet-stream" });
-
-      // Compute expiry
+      // 2. Build upload metadata (independent of encryption).
       let expiresAt = null;
       if (mode === "days") {
         const d = new Date();
@@ -445,11 +397,12 @@
         claimRequired: claimRequiredField.checked ? "true" : "false",
       };
 
-      // 4. Upload
-      const result = await uploadEncryptedBlob(blob, selectedFile.name, uploadOptions);
+      // 3. Encrypt and upload chunk-by-chunk so the whole file is never buffered.
+      const result = await encryptAndUpload(selectedFile, key, selectedFile.name, uploadOptions);
       announceUploadStatus("Upload complete. Generating your share link.");
       setProgress(progressFill, 100, "Upload complete");
       showResult(result, keyString);
+      await storeVaultEntry(result, keyString);
     } catch (err) {
       const message = err && err.message
         ? err.message
@@ -476,6 +429,63 @@
     formData.append("claimRequired", uploadOptions.claimRequired);
   }
 
+  // Reads the optional account session shared with the account page (account.js,
+  // same sessionStorage key). When present, uploads are attributed to the
+  // account; absent or expired, the upload proceeds anonymously.
+  // The account session lives in sessionStorage (tab-only) or localStorage
+  // ("remember me"); read whichever is present and unexpired.
+  function readAccountSession() {
+    const stores = [sessionStorage, localStorage];
+    for (let i = 0; i < stores.length; i += 1) {
+      try {
+        const raw = stores[i].getItem(ACCOUNT_SESSION_KEY);
+        if (!raw) continue;
+        const session = JSON.parse(raw);
+        if (session && session.token && !(session.expiresAt && Date.now() > session.expiresAt)) {
+          return session;
+        }
+      } catch (_) {
+        // ignore and try the next store
+      }
+    }
+    return null;
+  }
+
+  function getAccountToken() {
+    const session = readAccountSession();
+    return session ? session.token : "";
+  }
+
+  function getAccountVaultKey() {
+    const session = readAccountSession();
+    return session ? (session.vaultKey || "") : "";
+  }
+
+  // When logged in with a vault key, store an encrypted vault entry so the new
+  // fuse appears on the dashboard with a recoverable link. Best-effort and
+  // non-fatal — the share itself already works regardless.
+  async function storeVaultEntry(result, keyString) {
+    const token = getAccountToken();
+    const vaultKeyB64 = getAccountVaultKey();
+    if (!token || !vaultKeyB64) return;
+    try {
+      const vaultKey = await FuseCrypto.importVaultKey(vaultKeyB64);
+      const blob = await FuseCrypto.encryptVaultEntry(vaultKey, JSON.stringify({
+        key: keyString,
+        ownerToken: result.ownerToken || "",
+        name: selectedFile.name,
+        url: result.url,
+      }));
+      await fetch("/api/account/vault", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+        body: JSON.stringify({ fuseId: result.id, blob }),
+      });
+    } catch (_) {
+      // Non-fatal.
+    }
+  }
+
   function sendUploadRequest(method, url, body, options) {
     const requestOptions = options || {};
 
@@ -487,6 +497,11 @@
         Object.keys(requestOptions.headers).forEach(function (header) {
           xhr.setRequestHeader(header, requestOptions.headers[header]);
         });
+      }
+
+      const accountToken = getAccountToken();
+      if (accountToken) {
+        xhr.setRequestHeader("Authorization", "Bearer " + accountToken);
       }
 
       if (requestOptions.onUploadProgress) {
@@ -529,12 +544,43 @@
     });
   }
 
-  async function uploadEncryptedBlob(blob, originalName, uploadOptions) {
-    if (blob.size <= configuredUploadChunkSize) {
-      return uploadEncryptedBlobSingle(blob, originalName, uploadOptions);
-    }
+  // Plaintext chunk size: bounded by our memory budget and the server's
+  // per-request limit (so each encrypted record fits one /api/upload/chunk POST).
+  function uploadChunkPlaintextSize() {
+    return Math.max(1, Math.min(FuseCrypto.DEFAULT_CHUNK_SIZE, configuredUploadChunkSize));
+  }
 
-    return uploadEncryptedBlobInChunks(blob, originalName, uploadOptions);
+  async function encryptAndUpload(file, key, originalName, uploadOptions) {
+    const chunkSize = uploadChunkPlaintextSize();
+    const noncePrefix = FuseCrypto.randomNoncePrefix();
+    const header = FuseCrypto.buildHeader(chunkSize, noncePrefix);
+    const numChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+    const encryptedTotal = header.length + file.size + numChunks * FuseCrypto.TAG_BYTES;
+
+    if (encryptedTotal <= configuredUploadChunkSize) {
+      return encryptAndUploadSingle(file, key, originalName, uploadOptions, header, noncePrefix, chunkSize, numChunks);
+    }
+    return encryptAndUploadChunked(file, key, originalName, uploadOptions, header, noncePrefix, chunkSize, numChunks, encryptedTotal);
+  }
+
+  // Reads one plaintext slice and returns its encrypted record (ciphertext+tag).
+  // Only one slice is in memory at a time, so total file size never matters.
+  async function encryptChunkAt(file, key, noncePrefix, index, chunkSize, numChunks) {
+    const start = index * chunkSize;
+    const slice = file.slice(start, Math.min(file.size, start + chunkSize));
+    const plaintext = new Uint8Array(await slice.arrayBuffer());
+    return FuseCrypto.encryptChunk(key, noncePrefix, index, index === numChunks - 1, plaintext);
+  }
+
+  async function encryptAndUploadSingle(file, key, originalName, uploadOptions, header, noncePrefix, chunkSize, numChunks) {
+    const parts = [header];
+    for (let index = 0; index < numChunks; index += 1) {
+      parts.push(await encryptChunkAt(file, key, noncePrefix, index, chunkSize, numChunks));
+      setProgress(progressFill, 10 + ((index + 1) / numChunks) * 40, "Encrypting file in your browser");
+    }
+    announceUploadStatus("Uploading encrypted file.");
+    const blob = new Blob(parts, { type: "application/octet-stream" });
+    return uploadEncryptedBlobSingle(blob, originalName, uploadOptions);
   }
 
   async function uploadEncryptedBlobSingle(blob, originalName, uploadOptions) {
@@ -550,42 +596,39 @@
     });
   }
 
-  async function uploadEncryptedBlobInChunks(blob, originalName, uploadOptions) {
-    setProgress(progressFill, 50, "Starting encrypted upload");
+  async function encryptAndUploadChunked(file, key, originalName, uploadOptions, header, noncePrefix, chunkSize, numChunks, encryptedTotal) {
+    announceUploadStatus("Uploading encrypted file.");
+    setProgress(progressFill, 10, "Encrypting & uploading");
 
     const started = await sendUploadRequest(
       "POST",
       "/api/upload/start",
-      JSON.stringify({ totalSize: blob.size }),
+      JSON.stringify({ totalSize: encryptedTotal }),
       { headers: { "Content-Type": "application/json" } },
     );
-
     const uploadId = started && started.uploadId;
-    const chunkSize = started && Number.isFinite(started.chunkSize)
-      ? started.chunkSize
-      : configuredUploadChunkSize;
-    if (!uploadId || !Number.isFinite(chunkSize) || chunkSize <= 0) {
+    if (!uploadId) {
       throw new Error("the server could not start a chunked upload.");
     }
 
-    const totalChunks = Math.ceil(blob.size / chunkSize);
-    for (let index = 0; index < totalChunks; index += 1) {
-      const start = index * chunkSize;
-      const end = Math.min(blob.size, start + chunkSize);
-      const chunk = blob.slice(start, end);
+    for (let index = 0; index < numChunks; index += 1) {
+      const record = await encryptChunkAt(file, key, noncePrefix, index, chunkSize, numChunks);
+      // The v2 header rides along with the first chunk so the assembled file
+      // starts with it.
+      const filePart = index === 0 ? new Blob([header, record]) : new Blob([record]);
+
       const formData = new FormData();
       formData.append("uploadId", uploadId);
       formData.append("chunkIndex", String(index));
-      formData.append("totalChunks", String(totalChunks));
-      formData.append("totalSize", String(blob.size));
-      formData.append("file", chunk, originalName + ".part");
+      formData.append("totalChunks", String(numChunks));
+      formData.append("totalSize", String(encryptedTotal));
+      formData.append("file", filePart, originalName + ".part");
 
       await sendUploadRequest("POST", "/api/upload/chunk", formData, {
         onUploadProgress: function (loaded, total) {
-          const chunkLoaded = Math.min(loaded, total);
-          const uploaded = start + chunkLoaded;
-          const pct = 50 + (uploaded / blob.size) * 45;
-          setProgress(progressFill, pct, "Uploading encrypted file (" + (index + 1) + " of " + totalChunks + ")");
+          const within = total > 0 ? Math.min(loaded, total) / total : 0;
+          const pct = 10 + ((index + within) / numChunks) * 85;
+          setProgress(progressFill, pct, "Encrypting & uploading (" + (index + 1) + " of " + numChunks + ")");
         },
       });
     }
@@ -595,8 +638,8 @@
     const completePayload = Object.assign({}, uploadOptions, {
       uploadId,
       originalName,
-      totalSize: blob.size,
-      totalChunks,
+      totalSize: encryptedTotal,
+      totalChunks: numChunks,
     });
 
     return sendUploadRequest(
@@ -680,7 +723,7 @@
     addDetail("Claim code", result.claimRequired ? "Required on first download" : "Not required");
 
     showView(resultView);
-    document.title = "Share link ready \u2014 Fuse";
+    document.title = "Share link ready \u2014 " + instanceName();
     // Focus the heading first so screen readers announce the new view; sighted
     // users can still Tab into the link field immediately.
     resultHeading.focus();
@@ -828,7 +871,7 @@
     showProgressArea(false);
     setProgress(progressFill, 0, "");
     formError.textContent = "";
-    document.title = BASE_TITLE;
+    document.title = baseTitle();
     showView(uploadView);
     uploadHeading.setAttribute("tabindex", "-1");
     uploadHeading.focus();
@@ -848,7 +891,7 @@
     currentDownloadState.requiresPassword = false;
     currentDownloadState.requiresClaim = false;
 
-    document.title = "Download file \u2014 Fuse";
+    document.title = "Download file \u2014 " + instanceName();
     showView(downloadView);
     downloadHeading.focus();
 
@@ -888,11 +931,13 @@
       if (info.claimRequired) addDl("Claim", info.claimed ? "Already claimed" : "Claim code required for first download");
 
       downloadInfo.appendChild(dl);
-      document.title = "Download " + info.originalName + " \u2014 Fuse";
+      document.title = "Download " + info.originalName + " \u2014 " + instanceName();
       // The fetch can take a noticeable time. The heading was already rendered
       // on view switch, so announce the metadata now that it is visible.
       downloadStatus.textContent = "File ready: " + info.originalName + ", " + formatSize(info.size) + ".";
 
+      currentDownloadState.originalName = info.originalName || "";
+      currentDownloadState.size = Number(info.size) || 0;
       currentDownloadState.requiresPassword = !!info.hasPassword;
       currentDownloadState.requiresClaim = !!info.claimRequired && !info.claimed;
 
@@ -913,41 +958,6 @@
     }
   }
 
-  // Reads a fetch Response body chunk-by-chunk so callers can report real
-  // download progress. fetch() resolves once the headers arrive, so without
-  // this the whole body downloads invisibly inside a single await.
-  async function readResponseWithProgress(response, onProgress) {
-    const contentLength = Number(response.headers.get("Content-Length"));
-    const total = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0;
-
-    // Fall back to a plain read when the stream reader is unavailable.
-    if (!response.body || typeof response.body.getReader !== "function") {
-      const buffer = await response.arrayBuffer();
-      if (onProgress) onProgress(buffer.byteLength, total || buffer.byteLength);
-      return buffer;
-    }
-
-    const reader = response.body.getReader();
-    const chunks = [];
-    let received = 0;
-
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      if (onProgress) onProgress(received, total);
-    }
-
-    const result = new Uint8Array(received);
-    let offset = 0;
-    for (const chunk of chunks) {
-      result.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return result.buffer;
-  }
-
   async function performDownload() {
     const fuseId = currentDownloadState.fuseId;
     const keyString = currentDownloadState.keyString;
@@ -958,6 +968,29 @@
     downloadClaimCode.removeAttribute("aria-invalid");
     if (downloadSubmitBtn) downloadSubmitBtn.disabled = true;
     if (downloadDirectBtn) downloadDirectBtn.disabled = true;
+
+    function reenable() {
+      if (downloadSubmitBtn) downloadSubmitBtn.disabled = false;
+      if (downloadDirectBtn) downloadDirectBtn.disabled = false;
+    }
+
+    // Only for large files: choose the destination now — while the click's user
+    // activation is fresh — and stream to disk, dodging the ~2 GiB blob-download
+    // limit. Cancelling aborts before any download starts. Smaller files skip the
+    // picker entirely and download seamlessly.
+    let fileHandle = null;
+    if (window.showSaveFilePicker && currentDownloadState.size > STREAM_TO_DISK_THRESHOLD) {
+      try {
+        fileHandle = await window.showSaveFilePicker({ suggestedName: currentDownloadState.originalName || "download" });
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          reenable();
+          return;
+        }
+        fileHandle = null;
+      }
+    }
+
     showDownloadProgressArea(true);
     announceStatus(downloadStatus, "Download started.");
     setProgress(downloadProgressFill, 10, "Downloading encrypted file");
@@ -989,8 +1022,7 @@
           announceStatus(downloadStatus, "Download failed.");
         }
         showDownloadProgressArea(false);
-        if (downloadSubmitBtn) downloadSubmitBtn.disabled = false;
-        if (downloadDirectBtn) downloadDirectBtn.disabled = false;
+        reenable();
         if (isAuthFailure && downloadPassword && !passwordPrompt.hidden) {
           downloadPassword.setAttribute("aria-invalid", "true");
           downloadPassword.focus();
@@ -998,29 +1030,55 @@
         return;
       }
 
-      // Stream the body so the bar advances while the file downloads, instead
-      // of sitting frozen until the whole response has been buffered.
+      // Stream and decrypt chunk-by-chunk so the whole file is never held as one
+      // ArrayBuffer (which caps near 2 GiB). Auto-detects v2 vs legacy v1.
+      announceStatus(downloadStatus, "Downloading and decrypting.");
       let lastShownPercent = -1;
-      const encryptedBuffer = await readResponseWithProgress(resp, function (loaded, total) {
+      const onProgress = function (loaded, total) {
         if (!total) return;
-        const percent = Math.round(10 + (loaded / total) * 75);
+        const percent = Math.round(10 + (loaded / total) * 80);
         if (percent !== lastShownPercent) {
           lastShownPercent = percent;
-          setProgress(downloadProgressFill, percent, "Downloading encrypted file");
+          setProgress(downloadProgressFill, percent, "Downloading and decrypting");
         }
-      });
+      };
 
-      setProgress(downloadProgressFill, 88, "Decrypting file in your browser");
-      announceStatus(downloadStatus, "Decrypting file.");
+      const contentLength = Number(resp.headers.get("Content-Length")) || 0;
 
-      const key = await importKey(keyString);
-      const decrypted = await decryptData(encryptedBuffer, key);
-      setProgress(downloadProgressFill, 96, "Preparing file");
+      // Preferred path: stream decrypted chunks straight to disk. With no in-memory
+      // blob, files larger than the browser's ~2 GiB blob-download limit work.
+      if (fileHandle && resp.body && typeof resp.body.getReader === "function") {
+        const writable = await fileHandle.createWritable();
+        try {
+          await FuseCrypto.decryptStream(resp.body, keyString, onProgress, contentLength, function (chunk) {
+            return writable.write(chunk);
+          });
+          await writable.close();
+        } catch (err) {
+          try { await writable.abort(); } catch (_) {}
+          throw err;
+        }
+        setProgress(downloadProgressFill, 100, "Download complete");
+        announceStatus(downloadStatus, "Download complete. File decrypted successfully.");
+        return;
+      }
+
+      // Fallback: assemble a Blob and use an anchor download (works under ~2 GiB).
+      let blob;
+      if (resp.body && typeof resp.body.getReader === "function") {
+        blob = await FuseCrypto.decryptStreamToBlob(resp.body, keyString, onProgress, contentLength);
+      } else {
+        const all = new Uint8Array(await resp.arrayBuffer());
+        onProgress(all.length, contentLength || all.length);
+        blob = await FuseCrypto.decryptBufferToBlob(all, keyString);
+      }
+
+      setProgress(downloadProgressFill, 95, "Preparing file");
       announceStatus(downloadStatus, "Preparing file.");
 
       // Extract filename from Content-Disposition header
       const disposition = resp.headers.get("Content-Disposition") || "";
-      let filename = "download";
+      let filename = currentDownloadState.originalName || "download";
       const filenameMatch = disposition.match(/filename="?([^";\n]+)"?/);
       if (filenameMatch) {
         try {
@@ -1031,7 +1089,6 @@
       }
 
       // Trigger download
-      const blob = new Blob([decrypted]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -1047,8 +1104,7 @@
       showDownloadError("Decryption failed. The link may be invalid or corrupted.");
       announceStatus(downloadStatus, "Download failed.");
       showDownloadProgressArea(false);
-      if (downloadSubmitBtn) downloadSubmitBtn.disabled = false;
-      if (downloadDirectBtn) downloadDirectBtn.disabled = false;
+      reenable();
     }
   }
 
@@ -1092,6 +1148,9 @@
   } else {
     showView(uploadView);
     loadConfig();
+    const loggedIn = !!getAccountToken();
+    if (accountIndicator) accountIndicator.hidden = !loggedIn;
+    if (accountOptionalNotice) accountOptionalNotice.hidden = loggedIn;
   }
 
   // Set min date for date picker to today
