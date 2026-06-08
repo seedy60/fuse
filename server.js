@@ -76,7 +76,14 @@ const app = express();
 // X-Forwarded-For; use the hop count or your proxy's address instead.
 app.set("trust proxy", TRUST_PROXY);
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+// Always revalidate static assets so a redeploy's updated client code is picked
+// up on the next load instead of a stale cached copy — a stale app.js/crypto.js
+// silently breaks decryption when the on-the-wire format has changed.
+app.use(express.static(path.join(__dirname, "public"), {
+  setHeaders: function (res) {
+    res.setHeader("Cache-Control", "no-cache");
+  },
+}));
 
 const upload = multer({
   dest: UPLOAD_DIR,
@@ -1094,14 +1101,17 @@ app.post("/api/account/delete", requireAccount, async (req, res) => {
 });
 
 app.get("/d/:id", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.get("/revoke/:id", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
   res.sendFile(path.join(__dirname, "public", "revoke.html"));
 });
 
 app.get("/account", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
   res.sendFile(path.join(__dirname, "public", "account.html"));
 });
 

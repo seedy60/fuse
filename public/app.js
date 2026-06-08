@@ -1101,7 +1101,19 @@
       setProgress(downloadProgressFill, 100, "Download complete");
       announceStatus(downloadStatus, "Download complete. File decrypted successfully.");
     } catch (err) {
-      showDownloadError("Decryption failed. The link may be invalid or corrupted.");
+      // Surface the cause in the page's alert region so it is announced to
+      // screen readers, rather than only in the browser console (which they
+      // cannot reach). The error name distinguishes the common causes.
+      const name = (err && err.name) || "";
+      let message;
+      if (name === "OperationError") {
+        message = "Decryption failed: the key in the link may be wrong or incomplete, or the file may be corrupted.";
+      } else if (name === "QuotaExceededError") {
+        message = "Could not save the file: your device is out of storage space.";
+      } else {
+        message = "The download did not finish" + (name ? " (" + name + ")" : "") + " — it may have been interrupted. Please try again.";
+      }
+      showDownloadError(message);
       announceStatus(downloadStatus, "Download failed.");
       showDownloadProgressArea(false);
       reenable();
