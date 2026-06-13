@@ -118,7 +118,7 @@
 
   async function loadConfig() {
     try {
-      const response = await fetch("/api/config", { method: "GET" });
+      const response = await fetch("api/config", { method: "GET" });
       if (!response.ok) return;
       const config = await response.json();
       if (Number.isFinite(config.maxFileSize) && config.maxFileSize > 0) {
@@ -476,7 +476,7 @@
         name: selectedFile.name,
         url: result.url,
       }));
-      await fetch("/api/account/vault", {
+      await fetch("api/account/vault", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
         body: JSON.stringify({ fuseId: result.id, blob }),
@@ -588,7 +588,7 @@
     formData.append("file", blob, originalName);
     appendUploadOptions(formData, uploadOptions);
 
-    return sendUploadRequest("POST", "/api/upload", formData, {
+    return sendUploadRequest("POST", "api/upload", formData, {
       onUploadProgress: function (loaded, total) {
         const pct = 50 + (loaded / total) * 45;
         setProgress(progressFill, pct, "Uploading encrypted file");
@@ -602,7 +602,7 @@
 
     const started = await sendUploadRequest(
       "POST",
-      "/api/upload/start",
+      "api/upload/start",
       JSON.stringify({ totalSize: encryptedTotal }),
       { headers: { "Content-Type": "application/json" } },
     );
@@ -624,7 +624,7 @@
       formData.append("totalSize", String(encryptedTotal));
       formData.append("file", filePart, originalName + ".part");
 
-      await sendUploadRequest("POST", "/api/upload/chunk", formData, {
+      await sendUploadRequest("POST", "api/upload/chunk", formData, {
         onUploadProgress: function (loaded, total) {
           const within = total > 0 ? Math.min(loaded, total) / total : 0;
           const pct = 10 + ((index + within) / numChunks) * 85;
@@ -644,7 +644,7 @@
 
     return sendUploadRequest(
       "POST",
-      "/api/upload/complete",
+      "api/upload/complete",
       JSON.stringify(completePayload),
       { headers: { "Content-Type": "application/json" } },
     );
@@ -832,7 +832,7 @@
 
     blowFuseBtn.disabled = true;
     try {
-      const response = await fetch("/api/fuse/" + encodeURIComponent(currentFuseId) + "/revoke", {
+      const response = await fetch("api/fuse/" + encodeURIComponent(currentFuseId) + "/revoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ownerToken: currentOwnerToken }),
@@ -879,8 +879,19 @@
 
   // --- Download Flow ---
 
+  // The app's path with any base-path prefix (from the injected <base>) removed,
+  // so route matching works whether Fuse is mounted at "/" or a sub-path.
+  function routePath() {
+    let path = window.location.pathname;
+    try {
+      const base = new URL(document.baseURI).pathname.replace(/\/$/, "");
+      if (base && path.startsWith(base)) path = path.slice(base.length);
+    } catch (_) { /* fall back to the raw pathname */ }
+    return path || "/";
+  }
+
   async function initDownload() {
-    const match = window.location.pathname.match(/^\/d\/(.+)$/);
+    const match = routePath().match(/^\/d\/(.+)$/);
     if (!match) return;
 
     const fuseId = match[1];
@@ -902,7 +913,7 @@
 
     try {
       announceStatus(downloadStatus, "Loading file information.");
-      const resp = await fetch("/api/fuse/" + encodeURIComponent(fuseId));
+      const resp = await fetch("api/fuse/" + encodeURIComponent(fuseId));
       if (!resp.ok) {
         const err = await resp.json().catch(function () { return {}; });
         showDownloadError(err.error || "File not found or has expired.", true);
@@ -1000,7 +1011,7 @@
       if (password) payload.password = password;
       if (claimCode) payload.claimCode = String(claimCode).trim().toUpperCase();
 
-      const resp = await fetch("/api/fuse/" + encodeURIComponent(fuseId) + "/download", {
+      const resp = await fetch("api/fuse/" + encodeURIComponent(fuseId) + "/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1154,7 +1165,7 @@
 
   // --- Init ---
 
-  const isDownloadPage = window.location.pathname.startsWith("/d/");
+  const isDownloadPage = routePath().startsWith("/d/");
   if (isDownloadPage) {
     initDownload();
   } else {

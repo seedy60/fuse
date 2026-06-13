@@ -7,6 +7,17 @@
 
   var DEFAULT = "Fuse";
 
+  // A <base href> (used for sub-path deploys) makes a fragment-only link like
+  // the skip link resolve against the base, not the current page. Re-anchor it
+  // to the current URL so "Skip to main content" still jumps within this page.
+  var skip = document.querySelector("a.skip-link");
+  if (skip) {
+    var frag = skip.getAttribute("href");
+    if (frag && frag.charAt(0) === "#") {
+      skip.setAttribute("href", window.location.pathname + window.location.search + frag);
+    }
+  }
+
   function apply(name) {
     var instance = name || DEFAULT;
 
@@ -34,7 +45,7 @@
     apply: apply,
   };
 
-  fetch("/api/config")
+  fetch("api/config")
     .then(function (resp) { return resp.ok ? resp.json() : {}; })
     .then(function (cfg) { apply(cfg && cfg.instanceName); })
     .catch(function () { apply(DEFAULT); })

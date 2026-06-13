@@ -9,7 +9,18 @@
   const revokeSuccess = document.getElementById("revoke-success");
   const revokeHeading = document.getElementById("revoke-heading");
 
-  const match = window.location.pathname.match(/^\/revoke\/(.+)$/);
+  // The app's path with any base-path prefix (from the injected <base>) removed,
+  // so route matching works whether Fuse is mounted at "/" or a sub-path.
+  function routePath() {
+    let path = window.location.pathname;
+    try {
+      const base = new URL(document.baseURI).pathname.replace(/\/$/, "");
+      if (base && path.startsWith(base)) path = path.slice(base.length);
+    } catch (_) { /* fall back to the raw pathname */ }
+    return path || "/";
+  }
+
+  const match = routePath().match(/^\/revoke\/(.+)$/);
   let fuseId = "";
   if (match) {
     try {
@@ -51,7 +62,7 @@
 
     revokeBtn.disabled = true;
     try {
-      const response = await fetch("/api/fuse/" + encodeURIComponent(fuseId) + "/revoke", {
+      const response = await fetch("api/fuse/" + encodeURIComponent(fuseId) + "/revoke", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

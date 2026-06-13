@@ -17,6 +17,7 @@ const BASE_URL = (process.env.FUSE_BASE_URL || `http://localhost:${PORT}`)
   .replace(/\\(?=\/)/g, "")
   .replace(/\/+$/, "");
 const INSTANCE_NAME = process.env.FUSE_INSTANCE_NAME || "Fuse";
+const BASE_PATH = normalizeBasePath(process.env.FUSE_BASE_PATH);
 const UPLOAD_DIR = process.env.FUSE_UPLOAD_DIR || path.join(__dirname, "uploads");
 const CHUNK_UPLOAD_DIR = path.join(UPLOAD_DIR, ".chunks");
 const CLEANUP_INTERVAL = (parseInt(process.env.FUSE_CLEANUP_INTERVAL, 10) || 10) * 60 * 1000;
@@ -75,11 +76,27 @@ const app = express();
 // the direct socket. Do NOT set this to "true" blindly — that trusts a spoofable
 // X-Forwarded-For; use the hop count or your proxy's address instead.
 app.set("trust proxy", TRUST_PROXY);
+
+// Support mounting under a sub-path (FUSE_BASE_PATH, e.g. "/fuse"): strip the
+// prefix from the request URL so the routes below match at the root. Works
+// whether a reverse proxy forwards the prefix or strips it — the client always
+// addresses the prefixed paths via the <base> tag injected into each page.
+if (BASE_PATH) {
+  app.use(function (req, res, next) {
+    if (req.url === BASE_PATH || req.url.startsWith(BASE_PATH + "/") || req.url.startsWith(BASE_PATH + "?")) {
+      req.url = req.url.slice(BASE_PATH.length) || "/";
+      if (req.url[0] !== "/") req.url = "/" + req.url;
+    }
+    next();
+  });
+}
+
 app.use(express.json());
 // Always revalidate static assets so a redeploy's updated client code is picked
 // up on the next load instead of a stale cached copy — a stale app.js/crypto.js
 // silently breaks decryption when the on-the-wire format has changed.
 app.use(express.static(path.join(__dirname, "public"), {
+  index: false,
   setHeaders: function (res) {
     res.setHeader("Cache-Control", "no-cache");
   },
@@ -131,6 +148,14 @@ function parseTrustProxy(value) {
   if (normalized.toLowerCase() === "false") return false;
   if (/^\d+$/.test(normalized)) return Number(normalized);
   return normalized;
+}
+
+// Sub-path mount point. "" or "/" -> "" (root); "fuse" or "/fuse/" -> "/fuse"
+// (leading slash, no trailing slash).
+function normalizeBasePath(value) {
+  const trimmed = String(value || "").trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  return trimmed.startsWith("/") ? trimmed : "/" + trimmed;
 }
 
 function formatBytes(bytes) {
@@ -1100,20 +1125,27 @@ app.post("/api/account/delete", requireAccount, async (req, res) => {
   res.json({ ok: true, message: "Account and all fuses deleted." });
 });
 
-app.get("/d/:id", (req, res) => {
+// Serves an HTML page with a <base> tag injected so the page's relative asset
+// and API paths resolve correctly whether Fuse is mounted at the root ("/") or
+// a sub-path ("/fuse/"). The <base> is path-only, so it works on any host.
+function sendHtml(res, filename) {
   res.setHeader("Cache-Control", "no-cache");
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+  fs.readFile(path.join(__dirname, "public", filename), "utf8", (err, html) => {
+    if (err) {
+      console.error(`Failed to read ${filename}:`, err);
+      return res.status(500).send("Page unavailable.");
+    }
+    res.type("html").send(html.replace("<head>", `<head>\n  <base href="${BASE_PATH}/">`));
+  });
+}
 
-app.get("/revoke/:id", (req, res) => {
-  res.setHeader("Cache-Control", "no-cache");
-  res.sendFile(path.join(__dirname, "public", "revoke.html"));
-});
+app.get("/", (req, res) => sendHtml(res, "index.html"));
 
-app.get("/account", (req, res) => {
-  res.setHeader("Cache-Control", "no-cache");
-  res.sendFile(path.join(__dirname, "public", "account.html"));
-});
+app.get("/d/:id", (req, res) => sendHtml(res, "index.html"));
+
+app.get("/revoke/:id", (req, res) => sendHtml(res, "revoke.html"));
+
+app.get("/account", (req, res) => sendHtml(res, "account.html"));
 
 // --- Cleanup ---
 

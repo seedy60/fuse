@@ -145,7 +145,7 @@
 
   async function loadAccountConfig() {
     try {
-      const resp = await fetch("/api/config");
+      const resp = await fetch("api/config");
       if (resp.ok) {
         const cfg = await resp.json();
         if (Number.isFinite(cfg.accountNumberDigits) && cfg.accountNumberDigits >= 16) {
@@ -204,7 +204,7 @@
       // is sent. The server never sees the number or the vault key.
       const number = FuseCrypto.generateAccountNumber(accountNumberDigits);
       const keys = await FuseCrypto.deriveAccountKeys(number);
-      const resp = await fetch("/api/account/create", {
+      const resp = await fetch("api/account/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ authenticator: keys.authenticator, remember: remember }),
@@ -304,7 +304,7 @@
     try {
       const remember = !!(rememberMe && rememberMe.checked);
       const keys = await FuseCrypto.deriveAccountKeys(number);
-      const resp = await fetch("/api/account/login", {
+      const resp = await fetch("api/account/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ authenticator: keys.authenticator, remember: remember }),
@@ -328,7 +328,7 @@
     announce(dashboardStatus, "Loading your fuses.");
     let data;
     try {
-      const resp = await fetch("/api/account/fuses", { headers: authHeaders() });
+      const resp = await fetch("api/account/fuses", { headers: authHeaders() });
       if (resp.status === 401) {
         clearSession();
         showGate("Your session expired. Please log in again.");
@@ -461,7 +461,7 @@
     }
     btn.disabled = true;
     try {
-      const resp = await fetch("/api/account/fuses/" + encodeURIComponent(fuse.id) + "/blow", {
+      const resp = await fetch("api/account/fuses/" + encodeURIComponent(fuse.id) + "/blow", {
         method: "POST",
         headers: authHeaders(),
       });
@@ -523,7 +523,7 @@
     deleteConfirmBtn.disabled = true;
     try {
       const keys = await FuseCrypto.deriveAccountKeys(number);
-      const resp = await fetch("/api/account/delete", {
+      const resp = await fetch("api/account/delete", {
         method: "POST",
         headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
         body: JSON.stringify({ authenticator: keys.authenticator }),

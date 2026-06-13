@@ -182,6 +182,7 @@ The following table lists each Fuse environment variable, its default value, and
 | `FUSE_INSTANCE_NAME` | `Fuse` | Display name shown in the header, browser tab titles, and footer |
 | `FUSE_MAX_FILE_SIZE` | `524288000` | Maximum upload size in bytes (500 MB default). Uploads stream in encrypted chunks so they scale to this limit; downloads assemble the decrypted file in browser memory, so large downloads are bounded by recipient RAM |
 | `FUSE_BASE_URL` | `http://localhost:3000` | Base URL used to build share links |
+| `FUSE_BASE_PATH` | empty | Mount Fuse under a sub-path (e.g. `/fuse` to serve at `example.com/fuse`). Empty serves at the domain root. When set, include the sub-path in `FUSE_BASE_URL` too so share links are correct |
 | `FUSE_SSL_CERT` | empty | Path to TLS certificate file to enable HTTPS |
 | `FUSE_SSL_KEY` | empty | Path to TLS private key file to enable HTTPS |
 | `FUSE_TRUST_PROXY` | empty | Express trust proxy setting for deployments behind a reverse proxy, so rate limiters see the real client IP. Use a hop count (e.g. `1`) or the proxy address, never `true`. Empty trusts only the direct socket |
@@ -207,6 +208,8 @@ The following table lists each Fuse environment variable, its default value, and
 | `FUSE_ACCOUNT_LOGIN_MAX_QUEUE` | `20` | Verifications allowed to queue behind the concurrency cap before excess requests receive HTTP 503 |
 
 `FUSE_BASE_URL` is normalized by the server before links are generated. This removes escaped slash or backslash formatting artifacts and trailing slashes.
+
+To serve Fuse under a sub-path (for example `example.com/fuse`, or `sub.example.com/fuse`), set `FUSE_BASE_PATH=/fuse` and include the sub-path in `FUSE_BASE_URL` (e.g. `https://example.com/fuse`). Fuse injects a path-only `<base>` element into each page, so the same setting works on any host or subdomain, and it accepts the prefix whether your reverse proxy forwards it (`proxy_pass http://localhost:3000;`) or strips it.
 
 ## Usage
 
