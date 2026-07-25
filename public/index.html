@@ -124,11 +124,12 @@
       </div>
 
       <div class="link-box stack" id="claim-code-box" hidden>
-        <label for="claim-code">First-download claim code</label>
+        <label for="claim-code">Code for the first download</label>
         <div class="row">
-          <input type="text" id="claim-code" readonly>
+          <input type="text" id="claim-code" readonly aria-describedby="claim-code-hint">
           <button type="button" id="copy-claim-btn">Copy code</button>
         </div>
+        <p id="claim-code-hint" class="hint">The first person to download must enter this code. It stops anyone else who gets the link from taking the file first.</p>
       </div>
 
       <div class="link-box stack" id="password-box" hidden>
@@ -140,22 +141,24 @@
       </div>
 
       <p id="link-hint" class="hint">The key and claim code are never stored in plain text on the server.</p>
-      <p class="hint warning">If you accidentally leak secrets, use the owner token to blow the fuse instantly.</p>
+      <p class="hint warning">Sent a secret to the wrong person? Use your cancel code or cancel link below to shut the share down instantly.</p>
 
       <div class="link-box stack">
-        <label for="owner-token">Owner revoke token (save this)</label>
+        <label for="owner-token">Your cancel code (save this)</label>
         <div class="row">
-          <input type="text" id="owner-token" readonly>
-          <button type="button" id="copy-owner-btn">Copy token</button>
+          <input type="text" id="owner-token" readonly aria-describedby="owner-token-hint">
+          <button type="button" id="copy-owner-btn">Copy cancel code</button>
         </div>
+        <p id="owner-token-hint" class="hint">Keep this private. It lets you cancel the share at any time so the file can no longer be downloaded.</p>
       </div>
 
       <div class="link-box stack">
-        <label for="revoke-link">Emergency revoke URL</label>
+        <label for="revoke-link">Cancel link</label>
         <div class="row">
-          <input type="text" id="revoke-link" readonly>
-          <button type="button" id="copy-revoke-link-btn">Copy revoke URL</button>
+          <input type="text" id="revoke-link" readonly aria-describedby="revoke-link-hint">
+          <button type="button" id="copy-revoke-link-btn">Copy cancel link</button>
         </div>
+        <p id="revoke-link-hint" class="hint">Open this link to cancel the share instantly, useful if you sent a secret to the wrong person.</p>
       </div>
 
       <div class="actions-row">

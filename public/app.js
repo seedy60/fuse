@@ -802,11 +802,11 @@
   });
 
   copyKeyBtn.addEventListener("click", function () {
-    copyValue(shareKey, copyKeyBtn, "Copy key", "Decryption key copied.");
+    copyValue(shareKey, copyKeyBtn, "Copy key", "Key copied.");
   });
 
   copyClaimBtn.addEventListener("click", function () {
-    copyValue(claimCodeField, copyClaimBtn, "Copy code", "Claim code copied.");
+    copyValue(claimCodeField, copyClaimBtn, "Copy code", "First-download code copied.");
   });
 
   copyPasswordBtn.addEventListener("click", function () {
@@ -814,11 +814,11 @@
   });
 
   copyOwnerBtn.addEventListener("click", function () {
-    copyValue(ownerTokenField, copyOwnerBtn, "Copy token", "Owner revoke token copied.");
+    copyValue(ownerTokenField, copyOwnerBtn, "Copy cancel code", "Cancel code copied.");
   });
 
   copyRevokeLinkBtn.addEventListener("click", function () {
-    copyValue(revokeLinkField, copyRevokeLinkBtn, "Copy revoke URL", "Emergency revoke URL copied.");
+    copyValue(revokeLinkField, copyRevokeLinkBtn, "Copy cancel link", "Cancel link copied.");
   });
 
   blowFuseBtn.addEventListener("click", async function () {
