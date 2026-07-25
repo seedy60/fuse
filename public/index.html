@@ -98,19 +98,25 @@
     <!-- Result View (share link) -->
     <section id="result-view" hidden aria-labelledby="result-heading">
       <h1 id="result-heading" tabindex="-1">Share link ready</h1>
-      <p>Your file is ready to share. Send each secret separately for better safety.</p>
+      <p>Your file is ready to share. Anyone opening it needs both the link and the key.</p>
 
       <div class="link-box stack">
-        <label for="share-link">Share URL</label>
+        <label for="share-link">Link</label>
         <div class="row">
           <input type="text" id="share-link" readonly aria-describedby="link-hint">
-          <button type="button" id="copy-full-btn">Copy full link</button>
-          <button type="button" id="copy-link-btn">Copy URL</button>
+        </div>
+        <div class="copy-choice">
+          <button type="button" id="copy-full-btn" aria-describedby="copy-full-hint">Copy link and key</button>
+          <p id="copy-full-hint" class="hint">Easiest: this single link opens the file on its own.</p>
+        </div>
+        <div class="copy-choice">
+          <button type="button" id="copy-link-btn" aria-describedby="copy-link-hint">Copy link only</button>
+          <p id="copy-link-hint" class="hint">Safer: then send the key separately in a different message.</p>
         </div>
       </div>
 
       <div class="link-box stack">
-        <label for="share-key">Decryption key</label>
+        <label for="share-key">Key (needed to open the file)</label>
         <div class="row">
           <input type="text" id="share-key" readonly>
           <button type="button" id="copy-key-btn">Copy key</button>
@@ -133,7 +139,7 @@
         </div>
       </div>
 
-      <p id="link-hint" class="hint">The decryption key and claim code are never stored in plain text on the server.</p>
+      <p id="link-hint" class="hint">The key and claim code are never stored in plain text on the server.</p>
       <p class="hint warning">If you accidentally leak secrets, use the owner token to blow the fuse instantly.</p>
 
       <div class="link-box stack">

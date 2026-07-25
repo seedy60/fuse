@@ -383,6 +383,10 @@ button.secondary:hover:not(:disabled) {
   font-size: 0.85rem;
 }
 
+.copy-choice {
+  margin-top: 0.75rem;
+}
+
 .warning {
   color: #ffd79a;
 }

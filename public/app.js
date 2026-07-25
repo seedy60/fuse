@@ -779,7 +779,7 @@
   }
 
   copyLinkBtn.addEventListener("click", function () {
-    copyValue(shareLink, copyLinkBtn, "Copy URL", "Share URL copied.");
+    copyValue(shareLink, copyLinkBtn, "Copy link only", "Link copied.");
   });
 
   copyFullBtn.addEventListener("click", function () {
@@ -792,8 +792,8 @@
     }
     navigator.clipboard.writeText(fullLink).then(function () {
       copyFullBtn.textContent = "Copied";
-      announceCopy("Full link copied.");
-      scheduleLabelReset(copyFullBtn, "Copy full link");
+      announceCopy("Link and key copied.");
+      scheduleLabelReset(copyFullBtn, "Copy link and key");
     }).catch(function () {
       shareLink.focus();
       shareLink.select();
